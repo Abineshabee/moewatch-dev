@@ -419,7 +419,7 @@ class CLIReporter:
         table.add_column("Layer", style="white", ratio=3, no_wrap=True)
         table.add_column("Risk Meter", ratio=2)
         table.add_column("Score", justify="center", width=6)
-        table.add_column("Level", justify="center", width=9)
+        table.add_column("Level", justify="center", width=11)
         table.add_column("Signal", justify="center", ratio=1)
         table.add_column("Trend", justify="center", width=11)
 
@@ -725,7 +725,12 @@ class CLIReporter:
     # ------------------------------------------------------------------
 
     def _render_alert_rich(self, alert: Alert) -> str:
-        """Render a single alert using Rich markup and print it."""
+        """Render a single alert using Rich markup and print it.
+
+        Returns a plain-text (markup-stripped) capture of the rendered
+        line, matching the contract of :meth:`render_alert` /
+        :meth:`render_dashboard`.
+        """
         assert self._console is not None
 
         level_val = (
@@ -742,7 +747,21 @@ class CLIReporter:
             f"{alert.message}"
         )
         self._console.print(line)
-        return line
+
+        # -- Capture an equivalent plain-text string for the return value -
+        buf = io.StringIO()
+        cap = Console(
+            file=buf,
+            width=self._term_width,
+            highlight=False,
+            markup=True,
+            no_color=True,
+            force_terminal=False,
+            legacy_windows=False,
+        )
+        cap.print(line)
+        return buf.getvalue().rstrip("\n")
+
 
     # ------------------------------------------------------------------
     # Plain-text fallback (no Rich)

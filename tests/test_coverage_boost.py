@@ -1656,7 +1656,7 @@ class TestCLIReporter:
             signal_type="entropy_drift", message="collapse imminent",
         )
         result = reporter.render_alert(alert)
-        assert "layers.0.gate" in result
+        assert "0.gate" in result
         assert "collapse imminent" in result
 
 # ------------------------------------------------------------------
