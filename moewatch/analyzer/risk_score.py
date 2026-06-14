@@ -94,10 +94,10 @@ class RiskLevel(Enum):
         score ≥ 0.8.  Imminent collapse; intervention strongly recommended.
     """
 
-    LOW = "low"
-    MID = "mid"
-    HIGH = "high"
-    CRITICAL = "critical"
+    LOW = "LOW"
+    MID = "MID"
+    HIGH = "HIGH"
+    CRITICAL = "CRITICAL"
 
 
 # Risk score thresholds separating the four levels.
@@ -378,8 +378,8 @@ class RiskScoreFuser:
     # Query interface
     # ------------------------------------------------------------------
 
-    def get_latest_score(self, layer_name: str) -> Optional[float]:
-        """Return the most recently computed risk score for a layer.
+    def get_latest_score(self, layer_name: str) -> Optional[RiskReport]:
+        """Return the most recently computed RiskReport for a layer.
 
         Parameters
         ----------
@@ -388,12 +388,11 @@ class RiskScoreFuser:
 
         Returns
         -------
-        float or None
-            Most recent ``risk_score`` in [0, 1], or None if no report
-            has been computed for this layer yet.
+        RiskReport or None
+            Most recent ``RiskReport``, or None if no report has been
+            computed for this layer yet.
         """
-        report = self._latest_reports.get(layer_name)
-        return report.risk_score if report is not None else None
+        return self._latest_reports.get(layer_name)
 
     def get_latest_report(self, layer_name: str) -> Optional[RiskReport]:
         """Return the most recently computed RiskReport for a layer.
@@ -436,7 +435,7 @@ class RiskScoreFuser:
         -------
         RiskLevel
         """
-        if risk_score >= 0.8:
+        if risk_score > 0.8:
             return RiskLevel.CRITICAL
         if risk_score >= 0.6:
             return RiskLevel.HIGH

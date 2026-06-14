@@ -206,15 +206,20 @@ class FakeCollapsingMoEModel(nn.Module):
 
     def __init__(self, hidden: int = 32, n_experts: int = 8) -> None:
         super().__init__()
-        self.gate = nn.Linear(hidden, n_experts, bias=False)
+        self.gate = nn.Linear(hidden, n_experts, bias=True)
         self.experts = nn.ModuleList(
             [nn.Linear(hidden, hidden, bias=False) for _ in range(n_experts)]
         )
         self.n_experts = n_experts
-        # Bias gate toward expert 0 heavily
+        # Bias gate toward expert 0 heavily, independent of the input.
+        # Zeroing the weights and using a large positive bias for expert 0
+        # (and zero bias for the rest) guarantees expert 0 dominates the
+        # softmax for every input, regardless of the random seed or the
+        # sign of the input features.
         with torch.no_grad():
             self.gate.weight.data.zero_()
-            self.gate.weight.data[0] += 20.0  # expert 0 dominates
+            self.gate.bias.data.zero_()
+            self.gate.bias.data[0] = 20.0  # expert 0 dominates
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         logits = self.gate(x)

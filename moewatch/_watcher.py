@@ -275,6 +275,10 @@ class MoEWatch:
         self._alert_lock: threading.Lock = threading.Lock()
         self.alerts: List[Alert] = []
 
+        # Rolling accumulator of per-step reports (populated by step()).
+        from moewatch.report.watch_report import WatchReport
+        self.watch_report: WatchReport = WatchReport()
+
         # --- Sub-system instances (initialized in start()) ---
         self.hook_manager = None
         self.stat_collector = None
@@ -322,8 +326,9 @@ class MoEWatch:
             If no router modules are detectable.
         """
         if self._running:
-            logger.warning("[MoEWatch] start() called while already running. Ignored.")
-            return
+            raise RuntimeError(
+                "[MoEWatch] start() called while already running."
+            )
 
         self._start_time = time.time()
 
@@ -470,7 +475,7 @@ class MoEWatch:
         self,
         global_step: int,
         current_loss: float = 0.0,
-    ) -> "WatchReport":
+    ) -> "StepReport":
         """Process one training step through the full analysis pipeline.
 
         Called by ``MoEWatchCallback.on_step_end()`` after each optimizer
@@ -487,11 +492,13 @@ class MoEWatch:
 
         Returns
         -------
-        WatchReport
-            Structured report with risk scores, alerts, interventions,
-            and policy decisions for this step window.
+        StepReport
+            Structured per-step snapshot with risk scores, alerts,
+            interventions, and policy decisions for this step. Also
+            appended to ``self.watch_report`` for rolling/aggregate
+            access across steps.
         """
-        from moewatch.report.watch_report import WatchReport, StepReport
+        from moewatch.report.watch_report import StepReport
 
         self._global_step = global_step
 
@@ -629,7 +636,8 @@ class MoEWatch:
             dominant_signals=dominant_signals,
         )
 
-        watch_report = WatchReport(steps=[step_report])
+        watch_report = self.watch_report
+        watch_report.append(step_report)
 
         if global_step % self.config.log_every == 0:
             self._emit_report(
@@ -641,7 +649,7 @@ class MoEWatch:
                 alerts=new_alerts,
             )
 
-        return watch_report
+        return step_report
 
     # ------------------------------------------------------------------
     # Alert generation helpers
@@ -1168,11 +1176,12 @@ class MoEWatch:
         """
         if self.risk_fuser is None:
             return {}
-        return {
-            layer: self.risk_fuser.get_latest_score(layer)
-            for layer in self._layer_order
-            if self.risk_fuser.get_latest_score(layer) is not None
-        }
+        summary: Dict[str, float] = {}
+        for layer in self._layer_order:
+            report = self.risk_fuser.get_latest_score(layer)
+            if report is not None:
+                summary[layer] = report.risk_score
+        return summary
 
     @property
     def is_running(self) -> bool:

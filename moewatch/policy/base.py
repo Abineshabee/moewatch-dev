@@ -174,6 +174,20 @@ class PolicyState:
         risk_bucket = min(10, int(self.risk_score * 10))
         return f"L{self.layer_id}|R{risk_bucket}|{self.dominant_signal}"
 
+    def context_key(self) -> str:
+        """Return a coarse, hashable string key for this state.
+
+        Alias for :meth:`state_key`, provided for callers that refer to
+        the per-layer state signature as a "context" (e.g. policy memory
+        and bandit lookups keyed by observation context).
+
+        Returns
+        -------
+        str
+            Identical to :meth:`state_key`.
+        """
+        return self.state_key()
+
     def to_dict(self) -> dict:
         """Return a JSON-serialisable ``dict`` representation.
 

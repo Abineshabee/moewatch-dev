@@ -491,6 +491,12 @@ def _run_forward_loop(
                 )
                 break
 
+            except RuntimeError:
+                # Fatal errors (OOM, CUDA error, or other errors raised
+                # from within the model's forward pass) propagate to the
+                # caller rather than being silently skipped.
+                raise
+
             except Exception as exc:  # pylint: disable=broad-except
                 logger.warning(
                     "[MoEWatch] audit(): forward pass error on batch %d "
@@ -498,8 +504,7 @@ def _run_forward_loop(
                     batch_idx,
                     exc,
                 )
-                # Continue to next batch on non-fatal errors. Fatal errors
-                # (OOM, CUDA error) will propagate naturally.
+                # Continue to next batch on non-fatal errors.
 
     return batches_processed
 

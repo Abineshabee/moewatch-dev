@@ -139,9 +139,10 @@ class AuditReport:
     collapse_results : dict[str, LayerCollapseReport]
         Per-layer expert health-state analysis (HEALTHY / COLD / DEAD).
         Empty dict if the collapse detector was skipped or raised.
-    gradient_results : dict[str, dict[int, GradientStarvationReport]]
-        Per-layer, per-expert Tier 1 gradient starvation analysis.  Outer
-        key is the router layer name; inner key is the expert index (0-based).
+    gradient_results : dict[str, list[GradientStarvationReport]]
+        Per-layer list of Tier 1 gradient starvation analyses, one entry
+        per expert that has gradient data. Key is the router layer name;
+        each report exposes its own ``expert_id``.
         Empty dict if gradient hooks were not enabled or no events collected.
     cross_layer_results : CrossLayerReport or None
         Tier 3 inter-layer entropy correlation matrix.  ``None`` if the
@@ -165,7 +166,7 @@ class AuditReport:
     # Per-layer analyzer results
     entropy_results: Dict[str, LayerEntropyReport] = field(default_factory=dict)
     collapse_results: Dict[str, LayerCollapseReport] = field(default_factory=dict)
-    gradient_results: Dict[str, Dict[int, GradientStarvationReport]] = field(
+    gradient_results: Dict[str, List[GradientStarvationReport]] = field(
         default_factory=dict
     )
     cross_layer_results: Optional[CrossLayerReport] = field(default=None)
@@ -236,6 +237,24 @@ class AuditReport:
         """
         return self.risk_scores.get(layer_name)
 
+    def get_risk_for_layer(self, layer_name: str) -> Optional[RiskReport]:
+        """Look up the fused risk report for a specific layer.
+
+        Alias for :meth:`layer_risk`, provided for callers that prefer the
+        explicit ``get_*`` accessor naming convention.
+
+        Parameters
+        ----------
+        layer_name:
+            Fully-qualified router module name.
+
+        Returns
+        -------
+        RiskReport or None
+            The risk report if available, otherwise ``None``.
+        """
+        return self.risk_scores.get(layer_name)
+
     def layers_by_risk(self) -> List[Tuple[str, float]]:
         """Return all layers sorted by descending risk score.
 
@@ -268,9 +287,10 @@ class AuditReport:
             for every starved expert, sorted by gradient norm ascending.
         """
         starved: List[Tuple[str, int, float]] = []
-        for layer_name, expert_map in self.gradient_results.items():
-            for expert_id, gs_report in expert_map.items():
-                norm = getattr(gs_report, "mean_gradient_norm", float("inf"))
+        for layer_name, expert_reports in self.gradient_results.items():
+            for gs_report in expert_reports:
+                expert_id = getattr(gs_report, "expert_id", -1)
+                norm = getattr(gs_report, "gradient_norm_mean", float("inf"))
                 if norm < threshold:
                     starved.append((layer_name, expert_id, norm))
         return sorted(starved, key=lambda x: x[2])
@@ -420,10 +440,10 @@ class AuditReport:
             },
             "gradient_results": {
                 layer: {
-                    str(eid): _to_serializable(gs_report)
-                    for eid, gs_report in expert_map.items()
+                    str(getattr(gs_report, "expert_id", idx)): _to_serializable(gs_report)
+                    for idx, gs_report in enumerate(expert_reports)
                 }
-                for layer, expert_map in self.gradient_results.items()
+                for layer, expert_reports in self.gradient_results.items()
             },
             "cross_layer_results": _to_serializable(self.cross_layer_results),
             "risk_scores": {
@@ -534,11 +554,11 @@ class AuditReport:
                 row["entropy_alert"] = None
 
             # Gradient starvation
-            gs_map = self.gradient_results.get(layer_name, {})
-            if gs_map:
+            gs_list = self.gradient_results.get(layer_name, [])
+            if gs_list:
                 all_norms = [
-                    getattr(gsr, "mean_gradient_norm", 0.0)
-                    for gsr in gs_map.values()
+                    getattr(gsr, "gradient_norm_mean", 0.0)
+                    for gsr in gs_list
                 ]
                 row["min_expert_gradient_norm"] = min(all_norms)
                 row["starved_expert_count"] = sum(
