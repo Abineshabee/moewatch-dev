@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "moewatch"
+version = "0.2.0"
+description = "Real-time MoE routing health monitor with gradient starvation detection, risk scoring, and automated intervention for HuggingFace models"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Abinesh N", email = "abineshabee@gmail.com" }]
+requires-python = ">=3.9"
+dependencies = [
+    "torch>=2.0",
+    "transformers>=4.35",
+    "numpy>=1.24",
+    "rich>=13.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+]
+full = [
+    "pandas",
+    "scipy",
+    "scikit-learn",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["moewatch*"]
+
+[project.urls]
+Homepage = "https://github.com/Abineshabee/moewatch"
+Repository = "https://github.com/Abineshabee/moewatch"
+Issues = "https://github.com/Abineshabee/moewatch/issues"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["moewatch"]
+
+[tool.coverage.report]
+fail_under = 80
