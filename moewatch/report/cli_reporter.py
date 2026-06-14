@@ -19,19 +19,19 @@
 #
 # This is a ground-up redesign of the original CLIReporter. Layout:
 #
-#   +----------------------------------------------------------------+
+#   +-----------------------------------------------------------------+
 #   |  Top banner: title, step, timestamp, overall fused health gauge |
-#   +----------------------------------------------------------------+
+#   +-----------------------------------------------------------------+
 #   |  Layer Risk Map        |  Expert Health Grid                    |
 #   |  (sparkline trend +    |  (per-layer expert bars, status        |
 #   |   risk meter + level)  |   counts, imbalance ratio)             |
-#   +----------------------------------------------------------------+
+#   +-----------------------------------------------------------------+
 #   |  Entropy Radar (Tier 2 normalized entropy + drift markers)      |
-#   +----------------------------------------------------------------+
+#   +-----------------------------------------------------------------+
 #   |  Interventions Timeline   |  Policy Decisions                   |
-#   +----------------------------------------------------------------+
+#   +-----------------------------------------------------------------+
 #   |  Status bar: alerts, interventions, loss, worst layer           |
-#   +----------------------------------------------------------------+
+#   +-----------------------------------------------------------------+
 #
 # Public API is unchanged from the previous implementation:
 #   CLIReporter(config).render_dashboard(watch_report, entropy_analyzer,
