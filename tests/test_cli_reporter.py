@@ -4,25 +4,21 @@
 # ║║║ ║ ║ ║╣  ║║║ ╠═╣  ║  ║   ╠═╣
 # ╩ ╩ ╚═╝ ╚═╝ ╚╩╝ ╩ ╩  ╩  ╚═╝ ╩ ╩  v0.2.0
 #
-# tests/test_cli_reporter_coverage.py
+# tests/test_cli_reporter.py
 # =============================================================================
 #
 # Project      : MoEWatch
 # Description  : Coverage-focused tests for moewatch/report/cli_reporter.py.
 #
-#                 Targets both the Rich rendering path (_render_rich and its
-#                 _build_*_rich table builders) and the plain-text fallback
-#                 path (_render_plain), plus render_alert (rich + plain),
-#                 __init__ variants (no_color, NO_COLOR env var), and the
-#                 module-private helper functions (_ascii_risk_bar,
-#                 _expert_util_bar, _entropy_trend_arrow, _trend_arrow).
+#                Targets both the Rich rendering path and the plain-text
+#                fallback path, plus render_alert (rich + plain), __init__
+#                variants (no_color, NO_COLOR env var), and the module-private
+#                helper functions (_ascii_risk_bar, _expert_util_bar,
+#                _entropy_trend_arrow, _trend_arrow).
 #
-#                 entropy_analyzer / collapse_detector / risk_fuser are
-#                 supplied as MagicMock objects exposing exactly the
-#                 attributes/methods CLIReporter.render_dashboard() reads:
-#                   - entropy_analyzer.last_reports  -> dict[str, LayerEntropyReport-like]
-#                   - collapse_detector.last_reports -> dict[str, LayerCollapseReport]
-#                   - risk_fuser.latest_scores()     -> dict[str, RiskReport]
+#                entropy_analyzer / collapse_detector are supplied as
+#                MagicMock objects; risk_fuser exposes get_all_latest_reports()
+#                returning a real dict[str, RiskReport].
 #
 # =============================================================================
 
@@ -50,7 +46,7 @@ from moewatch.report.watch_report import StepReport, WatchReport
 
 
 # ===========================================================================
-# ── Helpers ───────────────────────────────────────────────────────────────
+# ── Helpers
 # ===========================================================================
 
 
@@ -59,10 +55,16 @@ def _config(**kwargs) -> WatchConfig:
 
 
 def _entropy_report(**kwargs) -> SimpleNamespace:
-    """Build an object exposing the attributes _build_entropy_table_rich /
-    _render_plain read via getattr (entropy_norm, trend, cusum_triggered,
-    alert_level)."""
-    defaults = dict(entropy_norm=0.5, trend="STABLE", cusum_triggered=False, alert_level=None)
+    """Build a SimpleNamespace exposing all attributes CLIReporter reads."""
+    defaults = dict(
+        normalized_entropy=0.5,
+        entropy_norm=0.5,       # legacy alias
+        trend="STABLE",
+        drift_detected=False,
+        cusum_triggered=False,  # legacy alias
+        drop_rate=0.0,
+        alert_level=None,
+    )
     defaults.update(kwargs)
     return SimpleNamespace(**defaults)
 
@@ -74,6 +76,7 @@ def _watch_report_with_step(step_report: StepReport, max_steps: int = 10) -> Wat
 
 
 def _mock_analyzers(entropy_reports=None, collapse_reports=None, risk_reports=None):
+    """Build mock analyzer objects. risk_fuser uses get_all_latest_reports()."""
     entropy_analyzer = MagicMock()
     entropy_analyzer.last_reports = entropy_reports or {}
 
@@ -81,13 +84,13 @@ def _mock_analyzers(entropy_reports=None, collapse_reports=None, risk_reports=No
     collapse_detector.last_reports = collapse_reports or {}
 
     risk_fuser = MagicMock()
-    risk_fuser.latest_scores.return_value = risk_reports or {}
+    risk_fuser.get_all_latest_reports.return_value = risk_reports or {}
 
     return entropy_analyzer, collapse_detector, risk_fuser
 
 
 # ===========================================================================
-# ── 1. __init__ variants ─────────────────────────────────────────────────
+# ── 1. __init__ variants
 # ===========================================================================
 
 
@@ -103,8 +106,6 @@ class TestCLIReporterInit:
         config = _config(no_color=True)
         reporter = CLIReporter(config)
         assert reporter._no_color is True
-        # Rich is available in this environment, so console still exists
-        # but with no_color/markup disabled.
         assert reporter._console is not None
 
     def test_no_color_via_env_var(self, monkeypatch) -> None:
@@ -121,7 +122,6 @@ class TestCLIReporterInit:
 
     def test_rich_unavailable_falls_back_to_plain_console(self, monkeypatch) -> None:
         import moewatch.report.cli_reporter as cli_mod
-
         monkeypatch.setattr(cli_mod, "_RICH_AVAILABLE", False)
         config = _config()
         reporter = CLIReporter(config)
@@ -129,7 +129,7 @@ class TestCLIReporterInit:
 
 
 # ===========================================================================
-# ── 2. render_dashboard — empty report ──────────────────────────────────
+# ── 2. render_dashboard — empty report
 # ===========================================================================
 
 
@@ -147,7 +147,6 @@ class TestRenderDashboardEmpty:
 
     def test_render_dashboard_with_empty_report_plain(self, monkeypatch) -> None:
         import moewatch.report.cli_reporter as cli_mod
-
         monkeypatch.setattr(cli_mod, "_RICH_AVAILABLE", False)
         config = _config()
         reporter = CLIReporter(config)
@@ -161,7 +160,7 @@ class TestRenderDashboardEmpty:
 
 
 # ===========================================================================
-# ── 3. render_dashboard — Rich path, full data ──────────────────────────
+# ── 3. render_dashboard — Rich path, full data
 # ===========================================================================
 
 
@@ -214,13 +213,16 @@ class TestRenderDashboardRich:
     def _full_entropy_reports(self) -> dict:
         return {
             "layers.0.gate": _entropy_report(
-                entropy_norm=0.15, trend="DROPPING", cusum_triggered=True, alert_level="CRITICAL"
+                normalized_entropy=0.15, trend="DROPPING",
+                drift_detected=True, drop_rate=-0.02,
             ),
             "layers.1.gate": _entropy_report(
-                entropy_norm=0.6, trend="STABLE", cusum_triggered=False, alert_level="WARNING"
+                normalized_entropy=0.6, trend="STABLE",
+                drift_detected=False, drop_rate=0.0,
             ),
             "layers.2.gate": _entropy_report(
-                entropy_norm=0.9, trend="RISING", cusum_triggered=False, alert_level=None
+                normalized_entropy=0.9, trend="RISING",
+                drift_detected=False, drop_rate=0.01,
             ),
         }
 
@@ -228,19 +230,25 @@ class TestRenderDashboardRich:
         return {
             "layers.0.gate": SimpleNamespace(
                 expert_states={
-                    0: ExpertState(expert_id=0, status=ExpertStatus.DEAD),
-                    1: ExpertState(expert_id=1, status=ExpertStatus.HEALTHY),
+                    0: ExpertState(expert_id=0, status=ExpertStatus.DEAD,   utilization=0.0),
+                    1: ExpertState(expert_id=1, status=ExpertStatus.HEALTHY, utilization=1.0),
                 },
-                utilisation_fractions={0: 0.0, 1: 1.0},
+                load_imbalance_ratio=2.5,
                 load_imbalance=2.5,
+                num_healthy_experts=1,
+                num_cold_experts=0,
+                num_dead_experts=1,
             ),
             "layers.1.gate": SimpleNamespace(
                 expert_states={
-                    0: ExpertState(expert_id=0, status=ExpertStatus.HEALTHY),
-                    1: ExpertState(expert_id=1, status=ExpertStatus.COLD),
+                    0: ExpertState(expert_id=0, status=ExpertStatus.HEALTHY, utilization=0.7),
+                    1: ExpertState(expert_id=1, status=ExpertStatus.COLD,    utilization=0.3),
                 },
-                utilisation_fractions={0: 0.7, 1: 0.3},
+                load_imbalance_ratio=None,
                 load_imbalance=None,
+                num_healthy_experts=1,
+                num_cold_experts=1,
+                num_dead_experts=0,
             ),
         }
 
@@ -305,10 +313,8 @@ class TestRenderDashboardRich:
             watch_report, entropy_analyzer, collapse_detector, risk_fuser
         )
         assert "Routing Health" in result
-        # No interventions table and no policy line should be present.
         assert "Active Interventions" not in result
         assert "Policy decisions" not in result
-        # Loss N/A path
         assert "loss=N/A" in result or "loss" in result
 
     def test_dashboard_with_empty_risk_scores(self) -> None:
@@ -325,14 +331,13 @@ class TestRenderDashboardRich:
 
 
 # ===========================================================================
-# ── 4. render_dashboard — plain-text fallback path ──────────────────────
+# ── 4. render_dashboard — plain-text fallback path
 # ===========================================================================
 
 
 class TestRenderDashboardPlain:
     def _patch_no_rich(self, monkeypatch) -> None:
         import moewatch.report.cli_reporter as cli_mod
-
         monkeypatch.setattr(cli_mod, "_RICH_AVAILABLE", False)
 
     def _full_step_report(self) -> StepReport:
@@ -357,11 +362,15 @@ class TestRenderDashboardPlain:
         watch_report = _watch_report_with_step(self._full_step_report())
         entropy_analyzer, collapse_detector, risk_fuser = _mock_analyzers(
             entropy_reports={
-                "layers.0.gate": _entropy_report(entropy_norm=0.2, trend="DROPPING"),
+                "layers.0.gate": _entropy_report(
+                    normalized_entropy=0.2, trend="DROPPING"
+                ),
             },
             risk_reports={
                 "layers.0.gate": RiskReport(
-                    layer_name="layers.0.gate", risk_score=0.85, risk_level=RiskLevel.CRITICAL
+                    layer_name="layers.0.gate",
+                    risk_score=0.85,
+                    risk_level=RiskLevel.CRITICAL,
                 )
             },
         )
@@ -387,7 +396,9 @@ class TestRenderDashboardPlain:
         entropy_analyzer, collapse_detector, risk_fuser = _mock_analyzers(
             risk_reports={
                 "layers.0.gate": RiskReport(
-                    layer_name="layers.0.gate", risk_score=0.85, risk_level=RiskLevel.CRITICAL
+                    layer_name="layers.0.gate",
+                    risk_score=0.85,
+                    risk_level=RiskLevel.CRITICAL,
                 )
             }
         )
@@ -395,7 +406,6 @@ class TestRenderDashboardPlain:
         result = reporter.render_dashboard(
             watch_report, entropy_analyzer, collapse_detector, risk_fuser
         )
-        # No ANSI escape codes should be present.
         assert "\033[" not in result
 
     def test_plain_dashboard_with_nan_loss_and_no_extras(self, monkeypatch) -> None:
@@ -426,7 +436,7 @@ class TestRenderDashboardPlain:
             step=1,
             timestamp=1700000000.0,
             risk_scores={"layers.0.gate": 0.5},
-            risk_levels={},  # missing -> defaults to RiskLevel.LOW.value
+            risk_levels={},
         )
         watch_report = _watch_report_with_step(sr)
         entropy_analyzer, collapse_detector, risk_fuser = _mock_analyzers()
@@ -438,7 +448,7 @@ class TestRenderDashboardPlain:
 
 
 # ===========================================================================
-# ── 5. render_alert ───────────────────────────────────────────────────────
+# ── 5. render_alert
 # ===========================================================================
 
 
@@ -468,7 +478,6 @@ class TestRenderAlert:
     )
     def test_render_alert_plain_all_levels(self, monkeypatch, level) -> None:
         import moewatch.report.cli_reporter as cli_mod
-
         monkeypatch.setattr(cli_mod, "_RICH_AVAILABLE", False)
         config = _config()
         reporter = CLIReporter(config)
@@ -486,7 +495,6 @@ class TestRenderAlert:
 
     def test_render_alert_plain_no_color(self, monkeypatch) -> None:
         import moewatch.report.cli_reporter as cli_mod
-
         monkeypatch.setattr(cli_mod, "_RICH_AVAILABLE", False)
         config = _config(no_color=True)
         reporter = CLIReporter(config)
@@ -510,7 +518,7 @@ class TestRenderAlert:
 
 
 # ===========================================================================
-# ── 6. Module-private helper functions ──────────────────────────────────
+# ── 6. Module-private helper functions
 # ===========================================================================
 
 
@@ -539,7 +547,7 @@ class TestExpertUtilBar:
 
     def test_single_expert_full_bar(self) -> None:
         result = _expert_util_bar({0: 1.0}, width=10)
-        assert "|" not in result  # single expert -> no separator
+        assert "|" not in result
         assert "█" in result
 
     def test_multiple_experts_separated(self) -> None:
@@ -548,29 +556,27 @@ class TestExpertUtilBar:
         assert len(parts) == 3
 
     def test_zero_max_util_handled(self) -> None:
-        # All zero -> max_util defaults to 1.0 via "or 1.0"
         result = _expert_util_bar({0: 0.0, 1: 0.0}, width=8)
         assert "|" in result
-        assert "█" not in result  # frac == 0 for all
+        assert "█" not in result
 
 
 class TestEntropyTrendArrow:
     @pytest.mark.parametrize(
         "trend,expected",
         [
-            ("RISING", "↑"),
-            ("rising", "↑"),
-            ("DROPPING", "↓"),
-            ("STABLE", "→"),
-            ("UNKNOWN", "?"),
-            ("something_else", "?"),
+            ("RISING",        "↑"),
+            ("rising",        "↑"),
+            ("DROPPING",      "↓"),
+            ("STABLE",        "→"),
+            ("UNKNOWN",       "?"),
+            ("something_else","?"),
         ],
     )
     def test_known_and_unknown_trends(self, trend, expected) -> None:
         assert _entropy_trend_arrow(trend) == expected
 
     def test_non_string_trend(self) -> None:
-        # isinstance check fails -> mapping.get(trend, "?") with non-str key
         assert _entropy_trend_arrow(None) == "?"
         assert _entropy_trend_arrow(123) == "?"
 

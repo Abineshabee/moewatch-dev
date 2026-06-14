@@ -370,9 +370,9 @@ class CollapseDetector:
         # fractions are normalised to [0, 1] while gradient norms are in a
         # different scale, we use a simple relative heuristic:
         # an expert is "cold" if its utilization < 1/n_experts * cold_factor.
-        cold_factor = max(0.0, self.config.cold_threshold / max(self.config.dead_threshold, 1e-6))
-        cold_factor = min(cold_factor, 10.0)  # cap to prevent extreme values
-        cold_util_threshold = (1.0 / n_experts) * cold_factor * 0.5
+        # An expert is "cold" if it receives less than half its fair share
+        # of tokens under uniform routing (1/n_experts).
+        cold_util_threshold = (1.0 / n_experts) * 0.5
 
         # An expert is dead-level when utilization is near zero.
         dead_util_threshold = (1.0 / n_experts) * 0.05
