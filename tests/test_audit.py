@@ -454,3 +454,323 @@ class TestAuditWithRouterOverride:
         dl = _make_dataloader(n_samples=16, hidden=small_moe_model.hidden, batch_size=4)
         with pytest.raises(ValueError):
             audit(small_moe_model, dl, num_batches=2, config=cfg, device="cpu")
+
+# ===========================================================================
+# ── 11. Internal helpers & defensive branches ──────────────────────────────
+# ===========================================================================
+
+from unittest.mock import MagicMock
+
+
+def test_resolve_device_cpu():
+    from moewatch._audit import _resolve_device
+
+    assert _resolve_device("cpu") == "cpu"
+
+
+def test_resolve_device_cuda_fallback():
+    from moewatch._audit import _resolve_device
+
+    with patch("torch.cuda.is_available", return_value=False):
+        result = _resolve_device("cuda")
+
+    assert result == "cpu"
+
+
+def test_move_batch_tensor():
+    from moewatch._audit import _move_batch_to_device
+
+    x = torch.randn(2, 3)
+
+    result = _move_batch_to_device(x, "cpu")
+
+    assert isinstance(result, torch.Tensor)
+    assert result.device.type == "cpu"
+
+
+def test_move_batch_dict():
+    from moewatch._audit import _move_batch_to_device
+
+    batch = {"x": torch.randn(2, 3)}
+
+    result = _move_batch_to_device(batch, "cpu")
+
+    assert isinstance(result, dict)
+    assert result["x"].device.type == "cpu"
+
+
+def test_move_batch_tuple():
+    from moewatch._audit import _move_batch_to_device
+
+    batch = (torch.randn(2, 3),)
+
+    result = _move_batch_to_device(batch, "cpu")
+
+    assert isinstance(result, tuple)
+    assert result[0].device.type == "cpu"
+
+
+def test_move_batch_passthrough():
+    from moewatch._audit import _move_batch_to_device
+
+    obj = "metadata"
+
+    assert _move_batch_to_device(obj, "cpu") == obj
+
+
+def test_run_single_forward_dict():
+    from moewatch._audit import _run_single_forward
+
+    model = MagicMock()
+
+    _run_single_forward(model, {"x": torch.randn(2, 3)})
+
+    model.assert_called_once()
+
+
+def test_run_single_forward_tuple():
+    from moewatch._audit import _run_single_forward
+
+    model = MagicMock()
+
+    _run_single_forward(model, (torch.randn(2, 3),))
+
+    model.assert_called_once()
+
+
+def test_run_single_forward_tensor():
+    from moewatch._audit import _run_single_forward
+
+    model = MagicMock()
+
+    _run_single_forward(model, torch.randn(2, 3))
+
+    model.assert_called_once()
+
+
+def test_run_single_forward_typeerror_retry():
+    from moewatch._audit import _run_single_forward
+
+    model = MagicMock()
+
+    def side_effect(*args, **kwargs):
+        if len(args) > 1:
+            raise TypeError("bad signature")
+        return None
+
+    model.side_effect = side_effect
+
+    _run_single_forward(model, (torch.randn(2, 3),))
+
+
+def test_count_dead_experts():
+    from moewatch._audit import _count_dead_experts
+
+    class Report:
+        def __init__(self, value):
+            self.gradient_norm_mean = value
+
+    config = _silent_config()
+    config.dead_threshold = 0.1
+
+    results = {
+        "layer": [
+            Report(0.01),
+            Report(0.05),
+            Report(1.0),
+        ]
+    }
+
+    assert _count_dead_experts(results, config) == 2
+
+
+def test_count_dead_experts_malformed_report():
+    from moewatch._audit import _count_dead_experts
+
+    class BadReport:
+        pass
+
+    config = _silent_config()
+
+    results = {"layer": [BadReport()]}
+
+    assert _count_dead_experts(results, config) == 0
+
+
+def test_audit_num_batches_zero_raises(
+    small_moe_model: FakeMoEModel,
+):
+    dl = _make_dataloader(hidden=small_moe_model.hidden)
+
+    with pytest.raises(ValueError):
+        audit(
+            small_moe_model,
+            dl,
+            num_batches=0,
+            config=_silent_config(),
+            device="cpu",
+        )
+
+# ===========================================================================
+# ── Additional _audit.py coverage tests ─────────────────────────────────────
+# ===========================================================================
+
+from unittest.mock import MagicMock
+
+
+def test_resolve_device_invalid():
+    from moewatch._audit import _resolve_device
+
+    with pytest.raises(RuntimeError):
+        _resolve_device("totally_invalid_device")
+
+
+def test_move_model_to_device_failure():
+    from moewatch._audit import _move_model_to_device
+
+    model = MagicMock()
+    model.to.side_effect = RuntimeError("boom")
+
+    with pytest.raises(RuntimeError):
+        _move_model_to_device(model, "cpu")
+
+
+def test_fuse_risk_scores_missing_entropy():
+    from moewatch._audit import _fuse_risk_scores
+
+    grad = MagicMock()
+    grad.starvation_score = 1.0
+
+    scores, critical = _fuse_risk_scores(
+        layer_order=["layer"],
+        entropy_results={},
+        gradient_results={"layer": [grad]},
+        cross_layer_result=None,
+        risk_fuser=MagicMock(),
+        RiskLevel=MagicMock(),
+    )
+
+    assert scores == {}
+    assert critical == []
+
+
+def test_fuse_risk_scores_missing_gradient():
+    from moewatch._audit import _fuse_risk_scores
+
+    scores, critical = _fuse_risk_scores(
+        layer_order=["layer"],
+        entropy_results={"layer": object()},
+        gradient_results={},
+        cross_layer_result=None,
+        risk_fuser=MagicMock(),
+        RiskLevel=MagicMock(),
+    )
+
+    assert scores == {}
+    assert critical == []
+
+
+def test_fuse_risk_scores_critical_layer():
+    from moewatch._audit import _fuse_risk_scores
+
+    class FakeRiskReport:
+        risk_level = "critical"
+
+    class FakeRiskLevel:
+        CRITICAL = "critical"
+
+    grad = MagicMock()
+    grad.starvation_score = 5.0
+
+    fuser = MagicMock()
+    fuser.fuse.return_value = FakeRiskReport()
+
+    scores, critical = _fuse_risk_scores(
+        layer_order=["layer"],
+        entropy_results={"layer": object()},
+        gradient_results={"layer": [grad]},
+        cross_layer_result=None,
+        risk_fuser=fuser,
+        RiskLevel=FakeRiskLevel,
+    )
+
+    assert "layer" in scores
+    assert critical == ["layer"]
+
+
+def test_fuse_risk_scores_fuser_exception():
+    from moewatch._audit import _fuse_risk_scores
+
+    grad = MagicMock()
+    grad.starvation_score = 5.0
+
+    fuser = MagicMock()
+    fuser.fuse.side_effect = RuntimeError("boom")
+
+    scores, critical = _fuse_risk_scores(
+        layer_order=["layer"],
+        entropy_results={"layer": object()},
+        gradient_results={"layer": [grad]},
+        cross_layer_result=None,
+        risk_fuser=fuser,
+        RiskLevel=MagicMock(),
+    )
+
+    assert scores == {}
+    assert critical == []
+
+
+def test_run_forward_loop_generic_exception_skipped():
+    from moewatch._audit import _run_forward_loop
+
+    class DummyModel(nn.Module):
+        def forward(self, x):
+            raise ValueError("non fatal")
+
+    dl = DataLoader(TensorDataset(torch.randn(8, 4)), batch_size=2)
+
+    processed = _run_forward_loop(
+        model=DummyModel(),
+        dataloader=dl,
+        num_batches=4,
+        device="cpu",
+    )
+
+    assert processed == 0
+
+
+def test_run_forward_loop_runtime_error_propagates():
+    from moewatch._audit import _run_forward_loop
+
+    class DummyModel(nn.Module):
+        def forward(self, x):
+            raise RuntimeError("fatal")
+
+    dl = DataLoader(TensorDataset(torch.randn(8, 4)), batch_size=2)
+
+    with pytest.raises(RuntimeError):
+        _run_forward_loop(
+            model=DummyModel(),
+            dataloader=dl,
+            num_batches=4,
+            device="cpu",
+        )
+
+
+def test_run_forward_loop_processes_batches():
+    from moewatch._audit import _run_forward_loop
+
+    class DummyModel(nn.Module):
+        def forward(self, x):
+            return x
+
+    dl = DataLoader(TensorDataset(torch.randn(32, 4)), batch_size=2)
+
+    processed = _run_forward_loop(
+        model=DummyModel(),
+        dataloader=dl,
+        num_batches=10,
+        device="cpu",
+    )
+
+    assert processed == 10

@@ -1,0 +1,1269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MoEWatch — Research Library Structure</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Syne:wght@400;500;600;700;800&display=swap');
+
+:root {
+  --bg0: #0a0b0d;
+  --bg1: #0f1013;
+  --bg2: #141519;
+  --bg3: #1a1b21;
+  --bg4: #20222a;
+  --border: rgba(255,255,255,0.06);
+  --border2: rgba(255,255,255,0.12);
+  --text1: #e8eaf2;
+  --text2: #8a90a8;
+  --text3: #4a5068;
+  --accent: #5b8af0;
+  --accent2: #3d6de0;
+  --green: #3ecf6e;
+  --amber: #f5a623;
+  --red: #f05b5b;
+  --purple: #a78bfa;
+  --cyan: #38bdf8;
+  --mono: 'JetBrains Mono', monospace;
+  --sans: 'Syne', sans-serif;
+}
+
+html, body {
+  background: var(--bg0);
+  color: var(--text1);
+  font-family: var(--mono);
+  font-size: 13px;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* ── LAYOUT ── */
+.shell {
+  display: grid;
+  grid-template-rows: 52px 1fr;
+  grid-template-columns: 320px 1fr 340px;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ── TOPBAR ── */
+.topbar {
+  grid-column: 1 / -1;
+  background: var(--bg1);
+  border-bottom: 1px solid var(--border2);
+  display: flex;
+  align-items: center;
+  padding: 0 20px;
+  gap: 16px;
+}
+
+.topbar-logo {
+  font-family: var(--sans);
+  font-weight: 800;
+  font-size: 16px;
+  letter-spacing: -0.03em;
+  color: var(--text1);
+  display: flex;
+  align-items: center;
+  gap: 0px;
+}
+
+.topbar-logo .moe { color: var(--accent); }
+.topbar-logo .watch { color: var(--text1); }
+
+.topbar-tag {
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--accent);
+  background: rgba(91,138,240,0.12);
+  border: 1px solid rgba(91,138,240,0.25);
+  padding: 2px 8px;
+  border-radius: 3px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.topbar-stats {
+  margin-left: auto;
+  display: flex;
+  gap: 24px;
+}
+
+.stat-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+}
+
+.stat-value {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text1);
+  line-height: 1;
+}
+
+.stat-label {
+  font-size: 10px;
+  color: var(--text3);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  margin-top: 2px;
+}
+
+/* ── SIDEBAR ── */
+.sidebar {
+  background: var(--bg1);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.sidebar-header {
+  padding: 14px 16px 10px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.sidebar-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text3);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  margin-bottom: 8px;
+}
+
+.search-wrap {
+  position: relative;
+}
+
+.search-wrap svg {
+  position: absolute;
+  left: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 12px;
+  height: 12px;
+  stroke: var(--text3);
+}
+
+#search {
+  width: 100%;
+  background: var(--bg2);
+  border: 1px solid var(--border2);
+  border-radius: 4px;
+  color: var(--text1);
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 6px 8px 6px 26px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+#search:focus { border-color: var(--accent); }
+#search::placeholder { color: var(--text3); }
+
+.tree-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px 0;
+}
+
+.tree-scroll::-webkit-scrollbar { width: 4px; }
+.tree-scroll::-webkit-scrollbar-track { background: transparent; }
+.tree-scroll::-webkit-scrollbar-thumb { background: var(--bg4); border-radius: 2px; }
+
+/* ── TREE ROWS ── */
+.row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 12px;
+  cursor: pointer;
+  border-radius: 0;
+  transition: background 0.1s;
+  min-height: 26px;
+  user-select: none;
+  position: relative;
+}
+
+.row:hover { background: var(--bg3); }
+.row.active { background: rgba(91,138,240,0.10); }
+.row.active::before {
+  content: '';
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 2px;
+  background: var(--accent);
+}
+
+.row-indent {
+  color: var(--text3);
+  font-size: 11px;
+  white-space: pre;
+  flex-shrink: 0;
+}
+
+.row-icon {
+  flex-shrink: 0;
+  width: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.row-name {
+  flex: 1;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.row-name.is-dir {
+  font-weight: 600;
+  color: var(--text1);
+}
+
+.row-name.is-new {
+  color: var(--green);
+}
+
+.badge {
+  flex-shrink: 0;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  padding: 1px 5px;
+  border-radius: 2px;
+}
+
+.b-core  { background: rgba(91,138,240,0.15); color: var(--accent); border: 1px solid rgba(91,138,240,0.3); }
+.b-new   { background: rgba(62,207,110,0.12); color: var(--green);  border: 1px solid rgba(62,207,110,0.3); }
+.b-test  { background: rgba(245,166,35,0.12); color: var(--amber);  border: 1px solid rgba(245,166,35,0.3); }
+.b-doc   { background: rgba(167,139,250,0.12);color: var(--purple); border: 1px solid rgba(167,139,250,0.3);}
+.b-ci    { background: rgba(56,189,248,0.12); color: var(--cyan);   border: 1px solid rgba(56,189,248,0.3); }
+.b-exp   { background: rgba(240,91,91,0.12);  color: var(--red);    border: 1px solid rgba(240,91,91,0.3);  }
+
+/* ── MAIN PANEL ── */
+.main {
+  background: var(--bg0);
+  overflow-y: auto;
+  padding: 28px 32px;
+}
+
+.main::-webkit-scrollbar { width: 4px; }
+.main::-webkit-scrollbar-thumb { background: var(--bg4); }
+
+.main-title {
+  font-family: var(--sans);
+  font-weight: 800;
+  font-size: 22px;
+  letter-spacing: -0.04em;
+  color: var(--text1);
+  margin-bottom: 4px;
+}
+
+.main-subtitle {
+  font-size: 12px;
+  color: var(--text3);
+  margin-bottom: 28px;
+  line-height: 1.6;
+}
+
+/* ── PHASE CARDS ── */
+.phases {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 28px;
+}
+
+.phase-card {
+  background: var(--bg1);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 14px 16px;
+  transition: border-color 0.2s;
+}
+
+.phase-card:hover { border-color: var(--border2); }
+
+.phase-num {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text3);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  margin-bottom: 4px;
+}
+
+.phase-title {
+  font-family: var(--sans);
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--text1);
+  margin-bottom: 6px;
+}
+
+.phase-desc {
+  font-size: 11px;
+  color: var(--text2);
+  line-height: 1.6;
+}
+
+/* ── SIGNAL TIERS ── */
+.tiers {
+  background: var(--bg1);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 16px;
+  margin-bottom: 28px;
+}
+
+.section-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text3);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  margin-bottom: 12px;
+}
+
+.tier-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.tier-row:last-child { border-bottom: none; }
+
+.tier-badge {
+  flex-shrink: 0;
+  width: 56px;
+  font-size: 10px;
+  font-weight: 700;
+  text-align: center;
+  padding: 3px 0;
+  border-radius: 3px;
+}
+
+.t1 { background: rgba(240,91,91,0.15); color: var(--red); border: 1px solid rgba(240,91,91,0.3); }
+.t2 { background: rgba(245,166,35,0.12); color: var(--amber); border: 1px solid rgba(245,166,35,0.3); }
+.t3 { background: rgba(56,189,248,0.12); color: var(--cyan); border: 1px solid rgba(56,189,248,0.3); }
+
+.tier-content { flex: 1; }
+
+.tier-name {
+  font-weight: 600;
+  color: var(--text1);
+  font-size: 12px;
+  margin-bottom: 3px;
+}
+
+.tier-detail {
+  font-size: 11px;
+  color: var(--text2);
+  line-height: 1.6;
+}
+
+.tier-timing {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--green);
+  font-weight: 600;
+  white-space: nowrap;
+  padding-top: 2px;
+}
+
+/* ── LEGEND ── */
+.legend {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 20px;
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  color: var(--text2);
+}
+
+/* ── DETAIL PANEL ── */
+.detail {
+  background: var(--bg1);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.detail-top {
+  padding: 16px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.detail-path {
+  font-size: 10px;
+  color: var(--text3);
+  margin-bottom: 6px;
+  word-break: break-all;
+}
+
+.detail-filename {
+  font-family: var(--sans);
+  font-weight: 700;
+  font-size: 15px;
+  color: var(--text1);
+  margin-bottom: 4px;
+}
+
+.detail-type-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.detail-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+}
+
+.detail-body::-webkit-scrollbar { width: 4px; }
+.detail-body::-webkit-scrollbar-thumb { background: var(--bg4); }
+
+.detail-section {
+  margin-bottom: 20px;
+}
+
+.detail-section-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text3);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  margin-bottom: 8px;
+}
+
+.detail-desc {
+  font-size: 12px;
+  color: var(--text2);
+  line-height: 1.75;
+}
+
+.exports-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.export-tag {
+  font-size: 11px;
+  font-family: var(--mono);
+  color: var(--accent);
+  background: rgba(91,138,240,0.10);
+  border: 1px solid rgba(91,138,240,0.2);
+  padding: 2px 8px;
+  border-radius: 3px;
+}
+
+.deps-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dep-item {
+  font-size: 11px;
+  color: var(--text2);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dep-arrow { color: var(--text3); }
+
+.detail-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text3);
+  font-size: 12px;
+  text-align: center;
+  gap: 8px;
+  padding: 24px;
+}
+
+.detail-empty svg {
+  width: 32px; height: 32px;
+  stroke: var(--text3);
+  opacity: 0.4;
+}
+
+.no-results {
+  padding: 20px 16px;
+  font-size: 12px;
+  color: var(--text3);
+  text-align: center;
+}
+
+/* ── DIVIDER ── */
+.divider {
+  height: 1px;
+  background: var(--border);
+  margin: 12px 0;
+}
+
+/* ── SCROLLBAR ── */
+.main::-webkit-scrollbar { width: 4px; }
+.main::-webkit-scrollbar-track { background: transparent; }
+.main::-webkit-scrollbar-thumb { background: var(--bg4); border-radius: 2px; }
+
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <!-- TOPBAR -->
+  <header class="topbar">
+    <div class="topbar-logo">
+      <span class="moe">MoE</span><span class="watch">Watch</span>
+    </div>
+    <div class="topbar-tag">Research Library v0.2.0</div>
+    <div class="topbar-stats">
+      <div class="stat-item">
+        <div class="stat-value" id="total-files">—</div>
+        <div class="stat-label">Files</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-value" id="total-new">—</div>
+        <div class="stat-label">New in v2</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-value" id="total-modules">—</div>
+        <div class="stat-label">Modules</div>
+      </div>
+    </div>
+  </header>
+
+  <!-- SIDEBAR -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <div class="sidebar-label">Project Tree</div>
+      <div class="search-wrap">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+        </svg>
+        <input id="search" type="text" placeholder="search files...">
+      </div>
+    </div>
+    <div class="tree-scroll" id="tree"></div>
+  </aside>
+
+  <!-- MAIN -->
+  <main class="main">
+    <div class="main-title">MoEWatch Research Architecture</div>
+    <div class="main-subtitle">
+      Predictive observability + adaptive control for MoE training.<br>
+      Green badges = new in v0.2.0 (research extensions). Click any file for details.
+    </div>
+
+    <!-- LEGEND -->
+    <div class="legend">
+      <div class="legend-item"><span class="badge b-core">core</span> Core library module</div>
+      <div class="legend-item"><span class="badge b-new">new</span> New in v0.2.0 (research)</div>
+      <div class="legend-item"><span class="badge b-test">test</span> Test / benchmark</div>
+      <div class="legend-item"><span class="badge b-doc">doc</span> Documentation</div>
+      <div class="legend-item"><span class="badge b-ci">ci</span> CI / DevOps</div>
+      <div class="legend-item"><span class="badge b-exp">exp</span> Experiment script</div>
+    </div>
+
+    <!-- PHASES -->
+    <div class="phases">
+      <div class="phase-card">
+        <div class="phase-num">Phase 1 — Ship First</div>
+        <div class="phase-title">Rule-Based Control</div>
+        <div class="phase-desc">Observe → Risk Score → Fixed Policy → Apply → Report. Safe, explainable, zero learning overhead. Ships as v0.2.0.0 stable.</div>
+      </div>
+      <div class="phase-card">
+        <div class="phase-num">Phase 2 — Research</div>
+        <div class="phase-title">Contextual Bandit Policy</div>
+        <div class="phase-desc">State → ε-greedy / Thompson Sampling → Discounted Reward → Policy Update. Transforms MoEWatch into a learning controller.</div>
+      </div>
+      <div class="phase-card">
+        <div class="phase-num">Attribution Layer</div>
+        <div class="phase-title">Counterfactual Baseline</div>
+        <div class="phase-desc">Intervention-conditioned baseline with exclusion windows. Prevents false credit. Core to scientific credibility of the paper.</div>
+      </div>
+      <div class="phase-card">
+        <div class="phase-num">Evaluation</div>
+        <div class="phase-title">Lead-Time + IES Metrics</div>
+        <div class="phase-desc">T_moewatch vs T_utilization. Intervention Efficiency Score = stability gain / intervention cost. Two metrics that answer every reviewer.</div>
+      </div>
+    </div>
+
+    <!-- SIGNAL TIERS -->
+    <div class="tiers">
+      <div class="section-label">Signal Hierarchy — Empirically Ordered Precursor Tiers</div>
+      <div class="tier-row">
+        <div class="tier-badge t1">TIER 1</div>
+        <div class="tier-content">
+          <div class="tier-name">Gradient Starvation</div>
+          <div class="tier-detail">Per-expert gradient norm via backward hooks. Primary causal precursor. Earliest signal — experts stop learning before they stop receiving tokens.</div>
+        </div>
+        <div class="tier-timing">50–200 steps early</div>
+      </div>
+      <div class="tier-row">
+        <div class="tier-badge t2">TIER 2</div>
+        <div class="tier-content">
+          <div class="tier-name">Entropy Drift</div>
+          <div class="tier-detail">CUSUM detector on per-layer routing entropy history. Confirms Tier 1 — router narrows before any expert actually dies.</div>
+        </div>
+        <div class="tier-timing">30–100 steps early</div>
+      </div>
+      <div class="tier-row">
+        <div class="tier-badge t3">TIER 3</div>
+        <div class="tier-content">
+          <div class="tier-name">Cross-Layer Propagation</div>
+          <div class="tier-detail">Inter-layer routing correlation matrix over time. Localizes collapse source vs downstream victims. System-level spread warning.</div>
+        </div>
+        <div class="tier-timing">Spread warning</div>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- DETAIL PANEL -->
+  <aside class="detail">
+    <div class="detail-top">
+      <div class="detail-path" id="dp-path">Select a file to inspect</div>
+      <div class="detail-filename" id="dp-name">—</div>
+      <div class="detail-type-row" id="dp-badges"></div>
+    </div>
+    <div class="detail-body" id="dp-body">
+      <div class="detail-empty">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+        </svg>
+        Click any file in the tree to see its purpose, exports, and dependencies.
+      </div>
+    </div>
+  </aside>
+
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════════
+// TREE DATA — Full OSS Research Library Structure
+// ═══════════════════════════════════════════════════════════════════
+const TREE = [
+
+  // ── ROOT ──────────────────────────────────────────────────────────
+  {type:'dir', name:'moewatch/', indent:0, path:'moewatch/',
+   desc:'Root of the MoEWatch research library. Top-level GitHub repository.',
+   exports:[], badge:null},
+
+  // ── GITHUB ────────────────────────────────────────────────────────
+  {type:'dir', name:'.github/', indent:1, path:'.github/',
+   desc:'GitHub-specific configuration: CI workflows, issue templates, PR templates, Dependabot config.',
+   exports:[], badge:'ci'},
+
+  {type:'dir', name:'workflows/', indent:2, path:'.github/workflows/',
+   desc:'GitHub Actions CI/CD workflow definitions.',
+   exports:[], badge:'ci'},
+
+  {type:'file', name:'ci.yml', indent:3, path:'.github/workflows/ci.yml', badge:'ci',
+   desc:'Main CI pipeline. Runs on every push and PR. Jobs: lint (ruff), type-check (mypy), test matrix (Python 3.9/3.10/3.11, CPU-only), coverage report upload to Codecov. Fails fast on any error.',
+   exports:[], deps:[]},
+
+  {type:'file', name:'release.yml', indent:3, path:'.github/workflows/release.yml', badge:'ci',
+   desc:'Automated PyPI release pipeline. Triggered on GitHub release tag (v*.*.*). Builds wheel + sdist via pyproject.toml, uploads to PyPI with OIDC trusted publishing. No API keys stored in repo.',
+   exports:[], deps:[]},
+
+  {type:'file', name:'benchmark.yml', indent:3, path:'.github/workflows/benchmark.yml', badge:'ci',
+   desc:'Weekly scheduled benchmark run on self-hosted GPU runner. Executes benchmarks/overhead_profile.py and benchmarks/lead_time_benchmark.py. Posts regression comment on PR if overhead increases >0.5%.',
+   exports:[], deps:[]},
+
+  {type:'file', name:'docs.yml', indent:3, path:'.github/workflows/docs.yml', badge:'ci',
+   desc:'Builds and deploys MkDocs documentation to GitHub Pages on every push to main. Runs mkdocs build --strict to catch broken links.',
+   exports:[], deps:[]},
+
+  {type:'dir', name:'ISSUE_TEMPLATE/', indent:2, path:'.github/ISSUE_TEMPLATE/',
+   desc:'Structured GitHub issue templates for bug reports, feature requests, and paper reproducibility issues.',
+   exports:[], badge:'ci'},
+
+  {type:'file', name:'bug_report.yml', indent:3, path:'.github/ISSUE_TEMPLATE/bug_report.yml', badge:'ci',
+   desc:'Bug report template. Fields: model family, MoEWatch version, Python version, PyTorch version, minimal reproducible example, expected vs actual behavior.',
+   exports:[], deps:[]},
+
+  {type:'file', name:'feature_request.yml', indent:3, path:'.github/ISSUE_TEMPLATE/feature_request.yml', badge:'ci',
+   desc:'Feature request template. Fields: motivation, proposed API, research context (paper link if applicable).',
+   exports:[], deps:[]},
+
+  {type:'file', name:'repro_issue.yml', indent:3, path:'.github/ISSUE_TEMPLATE/repro_issue.yml', badge:'ci',
+   desc:'Reproducibility issue template specifically for paper experiments. Tracks which experiment, which model, which seed, and what diverged from reported results.',
+   exports:[], deps:[]},
+
+  {type:'file', name:'PULL_REQUEST_TEMPLATE.md', indent:2, path:'.github/PULL_REQUEST_TEMPLATE.md', badge:'ci',
+   desc:'PR template. Sections: what changes, which tests added, does it affect public API, does it affect paper experiments.',
+   exports:[], deps:[]},
+
+  // ── CORE LIBRARY ──────────────────────────────────────────────────
+  {type:'dir', name:'moewatch/', indent:1, path:'moewatch/',
+   desc:'Core Python package. Import surface: from moewatch import MoEWatch, audit, WatchConfig.',
+   exports:[], badge:null},
+
+  {type:'file', name:'__init__.py', indent:2, path:'moewatch/__init__.py', badge:'core',
+   desc:'Public API surface. Exports: MoEWatch, MoEWatchCallback, audit, WatchConfig, OutputMode, AlertLevel, Alert, __version__. Lazy imports for fast startup. Guards for torch and transformers availability. NO_COLOR env support.',
+   exports:['MoEWatch','MoEWatchCallback','audit','WatchConfig','OutputMode','AlertLevel','Alert','__version__'],
+   deps:['_watcher.py','_audit.py','config.py']},
+
+  {type:'file', name:'_watcher.py', indent:2, path:'moewatch/_watcher.py', badge:'core',
+   desc:'MoEWatch class — live training-time monitor. Manages full lifecycle: start(), stop(), attach(trainer), step(global_step). Coordinates HookManager, StatCollector, all analyzers, intervention engine, and policy. Zero weight modification guarantee. Thread-safe alert emission. Context manager support.',
+   exports:['MoEWatch','MoEWatchCallback','Alert'],
+   deps:['config.py','hooks/manager.py','collector/stat_collector.py','analyzer/','intervention/','policy/','report/']},
+
+  {type:'file', name:'_audit.py', indent:2, path:'moewatch/_audit.py', badge:'core',
+   desc:'audit() function — offline post-training diagnostic. Accepts model + dataloader + steps. Runs N forward passes, collects routing stats, runs full analyzer suite (entropy, collapse, gradient proxy), returns AuditReport. No hooks left attached after call. CPU-safe.',
+   exports:['audit'],
+   deps:['config.py','hooks/manager.py','collector/stat_collector.py','analyzer/','report/audit_report.py']},
+
+  {type:'file', name:'config.py', indent:2, path:'moewatch/config.py', badge:'core',
+   desc:'WatchConfig dataclass — all tunable parameters in one place. Fields: dead_threshold, cold_threshold, cold_steps_limit, entropy_warn, entropy_critical, entropy_drop_warn, load_imbalance_warn, load_imbalance_error, log_every, sample_every, output, no_color, router_modules, intervention_enabled, policy_type (rule|bandit), bandit_epsilon, reward_discount_gamma, reward_window_steps, baseline_min_clean_steps, baseline_exclusion_window, intervention_cooldown, intervention_max_delta, loss_guard_threshold. Validated on construction.',
+   exports:['WatchConfig','OutputMode','AlertLevel'],
+   deps:[]},
+
+  // ── HOOKS ─────────────────────────────────────────────────────────
+  {type:'dir', name:'hooks/', indent:2, path:'moewatch/hooks/',
+   desc:'PyTorch hook layer. Responsible for attaching to router modules and capturing both forward (routing decisions) and backward (gradient flow) signals.',
+   exports:[], badge:null},
+
+  {type:'file', name:'__init__.py', indent:3, path:'moewatch/hooks/__init__.py', badge:'core',
+   desc:'Re-exports HookManager, RouterForwardHook, GradientStarvationHook, detect_router_modules.',
+   exports:['HookManager','RouterForwardHook','GradientStarvationHook','detect_router_modules'],
+   deps:[]},
+
+  {type:'file', name:'manager.py', indent:3, path:'moewatch/hooks/manager.py', badge:'core',
+   desc:'HookManager — owns all hook handles. attach() registers forward + backward hooks on detected router modules. detach() cleanly removes all handles. Guaranteed no leaked hooks even on exception (uses finally). Tracks handle list for safe teardown.',
+   exports:['HookManager'],
+   deps:['hooks/router_hook.py','hooks/gradient_hook.py','hooks/detection.py','collector/stat_collector.py']},
+
+  {type:'file', name:'router_hook.py', indent:3, path:'moewatch/hooks/router_hook.py', badge:'core',
+   desc:'RouterForwardHook — forward hook on router modules. Captures output tensor (routing logits or top-k indices), infers expert count, constructs RoutingEvent with timestamp and step. Writes to StatCollector ring buffer. Designed to be on the hot forward path: minimal allocation, no Python-level loops over tokens.',
+   exports:['RouterForwardHook','RoutingEvent'],
+   deps:['collector/stat_collector.py','config.py']},
+
+  {type:'file', name:'gradient_hook.py', indent:3, path:'moewatch/hooks/gradient_hook.py', badge:'new',
+   desc:'GradientStarvationHook — NEW in v0.2.0. Backward hook on expert weight tensors (register_full_backward_hook). Captures per-expert gradient L2 norm each backward pass. Writes GradientEvent to StatCollector. Sampling rate configurable (default: every 10 steps) to minimize overhead. Core data source for Tier 1 signal.',
+   exports:['GradientStarvationHook','GradientEvent'],
+   deps:['collector/stat_collector.py','config.py']},
+
+  {type:'file', name:'detection.py', indent:3, path:'moewatch/hooks/detection.py', badge:'core',
+   desc:'detect_router_modules() — auto-detects MoE router layers by module name patterns (gate, router, sparse_moe, block_sparse_moe) and output shape heuristics (2D float output with dim matching n_experts). Supports Mixtral, Qwen3-MoE, DeepSeek-MoE, OLMoE, and custom architectures via WatchConfig.router_modules override.',
+   exports:['detect_router_modules'],
+   deps:['config.py']},
+
+  // ── COLLECTOR ─────────────────────────────────────────────────────
+  {type:'dir', name:'collector/', indent:2, path:'moewatch/collector/',
+   desc:'Asynchronous stats aggregation layer. Decoupled from the hot forward/backward path. CPU-side to avoid GPU stalls.',
+   exports:[], badge:null},
+
+  {type:'file', name:'__init__.py', indent:3, path:'moewatch/collector/__init__.py', badge:'core',
+   desc:'Re-exports StatCollector, LayerStats, RingBuffer, GradientStats.',
+   exports:['StatCollector','LayerStats','RingBuffer','GradientStats'],
+   deps:[]},
+
+  {type:'file', name:'ring_buffer.py', indent:3, path:'moewatch/collector/ring_buffer.py', badge:'core',
+   desc:'RingBuffer — fixed-memory circular buffer for RoutingEvent and GradientEvent streams. Configurable capacity (default 1000 events per layer). Prevents unbounded memory growth during long training runs. Thread-safe write path (GIL-protected for Python-level append). Supports windowed reads for CUSUM and baseline computation.',
+   exports:['RingBuffer'],
+   deps:[]},
+
+  {type:'file', name:'stat_collector.py', indent:3, path:'moewatch/collector/stat_collector.py', badge:'core',
+   desc:'StatCollector — aggregates RoutingEvents into LayerStats (expert token counts, utilization, load imbalance score, raw logit window) and GradientEvents into GradientStats (per-expert gradient norm history). get_all_stats() returns a snapshot dict used by all analyzers. Thread-safe read path.',
+   exports:['StatCollector','LayerStats','GradientStats'],
+   deps:['ring_buffer.py','config.py']},
+
+  {type:'file', name:'baseline_tracker.py', indent:3, path:'moewatch/collector/baseline_tracker.py', badge:'new',
+   desc:'BaselineTracker — NEW in v0.2.0. Maintains intervention-conditioned counterfactual baseline per layer. Tracks which steps are "intervention-influenced" and excludes them from baseline regression window. Computes projected no-action trajectory via rolling linear regression on clean history. Exports compute_counterfactual_delta(layer, actual_value) → float. Critical for correct attribution.',
+   exports:['BaselineTracker'],
+   deps:['config.py','ring_buffer.py']},
+
+  // ── ANALYZER ──────────────────────────────────────────────────────
+  {type:'dir', name:'analyzer/', indent:2, path:'moewatch/analyzer/',
+   desc:'Metric computation layer. Pure functions and stateful analyzers — no side effects on the model. Fully testable on CPU with synthetic data.',
+   exports:[], badge:null},
+
+  {type:'file', name:'__init__.py', indent:3, path:'moewatch/analyzer/__init__.py', badge:'core',
+   desc:'Re-exports EntropyAnalyzer, CollapseDetector, GradientStarvationAnalyzer, CrossLayerCorrelation, RiskScoreFuser.',
+   exports:['EntropyAnalyzer','CollapseDetector','GradientStarvationAnalyzer','CrossLayerCorrelation','RiskScoreFuser'],
+   deps:[]},
+
+  {type:'file', name:'entropy.py', indent:3, path:'moewatch/analyzer/entropy.py', badge:'core',
+   desc:'EntropyAnalyzer — per-layer Shannon entropy. compute_entropy(probs) pure function. CUSUM detector on entropy history for drift detection (upgrade from simple recent-vs-prior). Normalized entropy against H_max = log2(n_experts). Trend: DECLINING / STABLE / IMPROVING / UNKNOWN. Source: logits (preferred) or counts (fallback). Exports LayerEntropyReport.',
+   exports:['EntropyAnalyzer','compute_entropy','LayerEntropyReport','EntropyResult'],
+   deps:['collector/stat_collector.py','config.py']},
+
+  {type:'file', name:'collapse.py', indent:3, path:'moewatch/analyzer/collapse.py', badge:'core',
+   desc:'CollapseDetector — expert health state machine: HEALTHY / COLD / DEAD / UNKNOWN. Cold-to-dead promotion via cold_steps_limit counter. Load imbalance score (max/mean ratio). Per-expert utilization and token count. Exports LayerCollapseReport. Stateful: maintains consecutive cold counters per layer per expert.',
+   exports:['CollapseDetector','ExpertStatus','LayerCollapseReport','ExpertState'],
+   deps:['collector/stat_collector.py','config.py']},
+
+  {type:'file', name:'gradient_starvation.py', indent:3, path:'moewatch/analyzer/gradient_starvation.py', badge:'new',
+   desc:'GradientStarvationAnalyzer — NEW in v0.2.0. Tier 1 primary signal. Consumes GradientStats from collector. Computes per-expert gradient norm rolling mean. Detects starvation: expert gradient norm < starvation_threshold for N consecutive steps. Outputs GradientStarvationReport with per-expert starvation_score (0.0–1.0) and starvation_onset_step estimate. This is the earliest and most actionable signal.',
+   exports:['GradientStarvationAnalyzer','GradientStarvationReport'],
+   deps:['collector/stat_collector.py','config.py']},
+
+  {type:'file', name:'cross_layer.py', indent:3, path:'moewatch/analyzer/cross_layer.py', badge:'new',
+   desc:'CrossLayerCorrelation — NEW in v0.2.0. Tier 3 localization signal. Maintains sliding window of per-layer entropy sequences. Computes pairwise Pearson correlation matrix over the window. Detects: source layer (highest entropy drop rate), downstream victims (high correlation with source), propagation velocity. Exports CrossLayerReport with propagation_graph and source_layer identification.',
+   exports:['CrossLayerCorrelation','CrossLayerReport'],
+   deps:['analyzer/entropy.py','config.py']},
+
+  {type:'file', name:'risk_score.py', indent:3, path:'moewatch/analyzer/risk_score.py', badge:'new',
+   desc:'RiskScoreFuser — NEW in v0.2.0. Fuses three tier signals into a single per-layer collapse risk score (0.0–1.0). Weighted sum: risk = w1*gradient_signal + w2*entropy_signal + w3*spread_signal where w1 > w2 > w3. Weights are configurable and validated (must sum to 1.0). Provides risk_score, risk_level (LOW/MID/HIGH/CRITICAL), and dominant_signal for explainability.',
+   exports:['RiskScoreFuser','RiskReport','RiskLevel'],
+   deps:['analyzer/gradient_starvation.py','analyzer/entropy.py','analyzer/cross_layer.py','config.py']},
+
+  {type:'file', name:'cusum.py', indent:3, path:'moewatch/analyzer/cusum.py', badge:'new',
+   desc:'CUSUM detector — NEW in v0.2.0. Cumulative sum change-point detection for entropy and gradient norm sequences. detect_change(series, threshold, drift) → (change_detected, change_point_step, cusum_value). Used by EntropyAnalyzer and GradientStarvationAnalyzer as the core statistical detector for drift. Replaces naive recent-vs-prior comparison.',
+   exports:['CUSUMDetector','detect_change'],
+   deps:[]},
+
+  // ── INTERVENTION ──────────────────────────────────────────────────
+  {type:'dir', name:'intervention/', indent:2, path:'moewatch/intervention/',
+   desc:'Intervention execution layer. Applies corrective actions to live training. Safety constraints enforced here. Zero chance of exceeding configured limits.',
+   exports:[], badge:'new'},
+
+  {type:'file', name:'__init__.py', indent:3, path:'moewatch/intervention/__init__.py', badge:'new',
+   desc:'Re-exports InterventionEngine, all Action classes, SafetyGuard.',
+   exports:['InterventionEngine','AuxLossAction','RouterNoiseAction','ExpertDropoutAction','NoOpAction','SafetyGuard'],
+   deps:[]},
+
+  {type:'file', name:'engine.py', indent:3, path:'moewatch/intervention/engine.py', badge:'new',
+   desc:'InterventionEngine — NEW in v0.2.0. Receives selected action from Policy. Validates against SafetyGuard before applying. Applies action to live training hyperparameters. Records intervention in BaselineTracker (marks steps as influenced). Schedules revert-on-degradation check after observation window. Maintains cooldown state per layer.',
+   exports:['InterventionEngine'],
+   deps:['intervention/actions.py','intervention/safety.py','collector/baseline_tracker.py','config.py']},
+
+  {type:'file', name:'actions.py', indent:3, path:'moewatch/intervention/actions.py', badge:'new',
+   desc:'Intervention action classes. AuxLossAction: adjusts aux_loss_coef by delta (soft load balancing). RouterNoiseAction: injects Gaussian noise into router logits (forces exploration). ExpertDropoutAction: temporarily increases expert dropout probability. NoOpAction: do nothing, continue monitoring. All actions are reversible and log their effect.',
+   exports:['AuxLossAction','RouterNoiseAction','ExpertDropoutAction','NoOpAction','InterventionAction'],
+   deps:['config.py']},
+
+  {type:'file', name:'safety.py', indent:3, path:'moewatch/intervention/safety.py', badge:'new',
+   desc:'SafetyGuard — NEW in v0.2.0. Pre-flight checks before any intervention executes. Checks: (1) cooldown not active for this layer, (2) intervention delta within max_delta limit, (3) training loss not spiking above loss_guard_threshold, (4) neighbor layers not already under intervention. If any check fails: action downgraded to NoOp and reason logged. This is the safety backstop.',
+   exports:['SafetyGuard','SafetyCheckResult'],
+   deps:['config.py']},
+
+  // ── POLICY ────────────────────────────────────────────────────────
+  {type:'dir', name:'policy/', indent:2, path:'moewatch/policy/',
+   desc:'Policy layer — decides which intervention to apply given current state. Phase 1: rule-based. Phase 2: contextual bandit. Swappable via WatchConfig.policy_type.',
+   exports:[], badge:'new'},
+
+  {type:'file', name:'__init__.py', indent:3, path:'moewatch/policy/__init__.py', badge:'new',
+   desc:'Re-exports PolicyBase, RulePolicy, BanditPolicy, PolicyState, PolicyMemory.',
+   exports:['PolicyBase','RulePolicy','BanditPolicy','PolicyState','PolicyMemory'],
+   deps:[]},
+
+  {type:'file', name:'base.py', indent:3, path:'moewatch/policy/base.py', badge:'new',
+   desc:'PolicyBase — abstract base class for all policies. select_action(state: PolicyState) → InterventionAction. update(state, action, reward) → None. save_checkpoint(path) / load_checkpoint(path). Defines the interface that RulePolicy and BanditPolicy both implement.',
+   exports:['PolicyBase','PolicyState'],
+   deps:['intervention/actions.py']},
+
+  {type:'file', name:'rule_policy.py', indent:3, path:'moewatch/policy/rule_policy.py', badge:'new',
+   desc:'RulePolicy — Phase 1 deterministic policy. Maps risk_score ranges to fixed actions: <0.3→NoOp, <0.6→AuxLoss, <0.8→RouterNoise, ≥0.8→ExpertDropout. Also considers intervention_history to avoid oscillation and neighbor health for cascade prevention. Explainable, no randomness, safe default.',
+   exports:['RulePolicy'],
+   deps:['policy/base.py','analyzer/risk_score.py','intervention/actions.py']},
+
+  {type:'file', name:'bandit_policy.py', indent:3, path:'moewatch/policy/bandit_policy.py', badge:'new',
+   desc:'BanditPolicy — Phase 2 contextual bandit. State vector: (risk_score, layer_id_encoded, training_step_normalized, intervention_history_embedding). Action space: {NoOp, AuxLoss, RouterNoise, ExpertDropout}. Algorithm: epsilon-greedy (default) or Thompson Sampling (via config). Reward: discounted counterfactual ΔH over observation window. Updates linear value estimates per action-context pair. Saves policy memory to checkpoint.',
+   exports:['BanditPolicy'],
+   deps:['policy/base.py','collector/baseline_tracker.py','intervention/actions.py','config.py']},
+
+  {type:'file', name:'memory.py', indent:3, path:'moewatch/policy/memory.py', badge:'new',
+   desc:'PolicyMemory — stores (state, action, reward) tuples across the training run. Supports replay for batch value updates. Serializable to JSON for cross-run transfer. Provides action_success_rate(action) and context_similarity(state) for Thompson Sampling priors. Maximum memory size configurable to prevent unbounded growth.',
+   exports:['PolicyMemory','ExperienceTuple'],
+   deps:[]},
+
+  {type:'file', name:'reward.py', indent:3, path:'moewatch/policy/reward.py', badge:'new',
+   desc:'RewardComputer — computes discounted counterfactual reward for a completed intervention. reward = Σ ΔH_counterfactual(t+k) * γ^k for k=1..K. ΔH_counterfactual from BaselineTracker. Exponential discount factor γ = WatchConfig.reward_discount_gamma (default 0.95). Handles delayed reward window K = WatchConfig.reward_window_steps (default 50).',
+   exports:['RewardComputer'],
+   deps:['collector/baseline_tracker.py','config.py']},
+
+  // ── REPORT ────────────────────────────────────────────────────────
+  {type:'dir', name:'report/', indent:2, path:'moewatch/report/',
+   desc:'Output and reporting layer. Separates data (AuditReport, WatchReport) from presentation (CLIReporter, JSONReporter).',
+   exports:[], badge:null},
+
+  {type:'file', name:'__init__.py', indent:3, path:'moewatch/report/__init__.py', badge:'core',
+   desc:'Re-exports AuditReport, WatchReport, CLIReporter, JSONReporter.',
+   exports:['AuditReport','WatchReport','CLIReporter','JSONReporter'],
+   deps:[]},
+
+  {type:'file', name:'audit_report.py', indent:3, path:'moewatch/report/audit_report.py', badge:'core',
+   desc:'AuditReport — structured result from audit(). Holds: per-layer entropy results, collapse reports, gradient starvation report, cross-layer propagation report, risk scores, intervention log (if any). Methods: summary(), dead_experts(), to_json(), to_dataframe(). Immutable dataclass.',
+   exports:['AuditReport'],
+   deps:['analyzer/']},
+
+  {type:'file', name:'watch_report.py', indent:3, path:'moewatch/report/watch_report.py', badge:'new',
+   desc:'WatchReport — NEW in v0.2.0. Live training report generated at each step() call. Includes current risk scores, active interventions, policy decisions, counterfactual reward estimates, and alert log since last call. Replaces raw Alert list for richer introspection. to_json() for programmatic consumption.',
+   exports:['WatchReport','StepReport'],
+   deps:['analyzer/risk_score.py','policy/','intervention/']},
+
+  {type:'file', name:'cli_reporter.py', indent:3, path:'moewatch/report/cli_reporter.py', badge:'core',
+   desc:'CLIReporter — ANSI terminal output. Renders: routing health dashboard, expert utilization histograms per layer, entropy bars with trend arrows, risk score meters, active intervention log, policy memory summary. NO_COLOR fallback. Respects terminal width.',
+   exports:['CLIReporter'],
+   deps:['report/audit_report.py','report/watch_report.py']},
+
+  {type:'file', name:'json_reporter.py', indent:3, path:'moewatch/report/json_reporter.py', badge:'new',
+   desc:'JSONReporter — NEW in v0.2.0. Emits newline-delimited JSON for log aggregators (Grafana, Splunk, W&B custom metrics). Every step() produces one JSON line with all metrics, risk scores, and intervention decisions. Suitable for real-time dashboards and experiment tracking pipelines.',
+   exports:['JSONReporter'],
+   deps:['report/watch_report.py']},
+
+  // ── TESTS ─────────────────────────────────────────────────────────
+  {type:'dir', name:'tests/', indent:1, path:'tests/',
+   desc:'Full test suite. All tests run on CPU with synthetic MoE models. No GPU, no real weights, no internet required. Target: 100% coverage.',
+   exports:[], badge:null},
+
+  {type:'file', name:'conftest.py', indent:2, path:'tests/conftest.py', badge:'test',
+   desc:'Pytest fixtures: SyntheticMoE (tiny 2-layer MoE with 4 experts), tiny_dataloader (random token tensors), default_config (WatchConfig with low thresholds for fast test triggering), collapsed_model (pre-baked dead expert state), gradient_starved_model (pre-baked starvation state). Makes every test GPU-free and self-contained.',
+   exports:['synthetic_model','collapsed_model','gradient_starved_model','tiny_dataloader','default_config'],
+   deps:[]},
+
+  {type:'file', name:'test_detection.py', indent:2, path:'tests/test_detection.py', badge:'test',
+   desc:'Tests detect_router_modules() against: SyntheticMoE (standard naming), mock MixtralSparseMoeBlock, custom-named routers, and models with no detectable routers (expects RuntimeError). Verifies WatchConfig.router_modules override works.',
+   exports:[], deps:[]},
+
+  {type:'file', name:'test_hooks.py', indent:2, path:'tests/test_hooks.py', badge:'test',
+   desc:'Tests HookManager: attach/detach lifecycle, context manager teardown, no leaked hooks after exception. Tests RouterForwardHook fires on forward pass and writes RoutingEvent. Tests GradientStarvationHook fires on backward pass and writes GradientEvent.',
+   exports:[], deps:[]},
+
+  {type:'file', name:'test_collector.py', indent:2, path:'tests/test_collector.py', badge:'test',
+   desc:'Tests RingBuffer capacity wrapping (old events evicted). Tests StatCollector expert token count aggregation (sum equals total tokens). Tests GradientStats rolling mean computation. Tests BaselineTracker exclusion window (post-intervention steps excluded from baseline regression).',
+   exports:[], deps:[]},
+
+  {type:'file', name:'test_entropy.py', indent:2, path:'tests/test_entropy.py', badge:'test',
+   desc:'Tests EntropyAnalyzer: uniform distribution (max entropy, INFO), one-hot (zero entropy, ERROR), partial collapse. Tests CUSUM detector: flat series (no change), monotone decline (change detected at correct step), noisy decline (robust detection). Tests trend direction transitions.',
+   exports:[], deps:[]},
+
+  {type:'file', name:'test_collapse.py', indent:2, path:'tests/test_collapse.py', badge:'test',
+   desc:'Injects synthetic expert utilization with known dead expert (0.0%) and cold expert (0.3%). Asserts ExpertStatus.state == DEAD and COLD respectively. Tests cold-to-dead promotion after cold_steps_limit consecutive cold observations. Tests load imbalance score computation.',
+   exports:[], deps:[]},
+
+  {type:'file', name:'test_gradient_starvation.py', indent:2, path:'tests/test_gradient_starvation.py', badge:'test',
+   desc:'NEW in v0.2.0. Tests GradientStarvationAnalyzer: normal gradient norms (no alert), artificially zeroed expert gradients (starvation detected), partial starvation (only subset of experts). Verifies starvation_onset_step estimation accuracy on synthetic series.',
+   exports:[], deps:[]},
+
+  {type:'file', name:'test_cross_layer.py', indent:2, path:'tests/test_cross_layer.py', badge:'test',
+   desc:'NEW in v0.2.0. Tests CrossLayerCorrelation: independent layer entropy sequences (low correlation), synchronized collapse sequences (high correlation, correct source identified), propagation velocity estimation. Uses synthetic entropy time series.',
+   exports:[], deps:[]},
+
+  {type:'file', name:'test_risk_score.py', indent:2, path:'tests/test_risk_score.py', badge:'test',
+   desc:'NEW in v0.2.0. Tests RiskScoreFuser: all-healthy inputs (score near 0), all-critical inputs (score near 1), partial inputs (correct weighted fusion). Verifies risk_level thresholds and dominant_signal identification. Tests weight validation (must sum to 1.0).',
+   exports:[], deps:[]},
+
+  {type:'file', name:'test_baseline_tracker.py', indent:2, path:'tests/test_baseline_tracker.py', badge:'test',
+   desc:'NEW in v0.2.0. Tests BaselineTracker: clean projection accuracy on linear series, contamination exclusion (post-intervention steps correctly excluded), minimum clean history enforcement (returns None when insufficient clean steps), reset after intervention cooldown.',
+   exports:[], deps:[]},
+
+  {type:'file', name:'test_policy.py', indent:2, path:'tests/test_policy.py', badge:'test',
+   desc:'NEW in v0.2.0. Tests RulePolicy: correct action selection at each risk level, oscillation prevention (same action not repeated immediately), neighbor health check. Tests BanditPolicy: action exploration (epsilon-greedy fires), policy update on positive reward, checkpoint save/load round-trip.',
+   exports:[], deps:[]},
+
+  {type:'file', name:'test_intervention.py', indent:2, path:'tests/test_intervention.py', badge:'test',
+   desc:'NEW in v0.2.0. Tests InterventionEngine: SafetyGuard blocks action when cooldown active, blocks when loss spike detected, blocks when delta exceeds max. Tests action application (AuxLoss changes hyperparameter, RouterNoise injects noise). Tests revert logic on degradation.',
+   exports:[], deps:[]},
+
+  {type:'file', name:'test_watcher.py', indent:2, path:'tests/test_watcher.py', badge:'test',
+   desc:'Integration test for MoEWatch end-to-end. Tests attach/detach, step() with pre-baked collapsed stats, TrainerCallback step forwarding, intervention firing at correct risk threshold, alert log accumulation, WatchReport contents.',
+   exports:[], deps:[]},
+
+  {type:'file', name:'test_audit.py', indent:2, path:'tests/test_audit.py', badge:'test',
+   desc:'Integration test for audit() end-to-end on CPU. AuditReport non-empty, dead_experts() returns list, gradient starvation report populated, cross-layer report populated, to_json() is valid JSON, no hooks leaked after completion.',
+   exports:[], deps:[]},
+
+  // ── BENCHMARKS ────────────────────────────────────────────────────
+  {type:'dir', name:'benchmarks/', indent:1, path:'benchmarks/',
+   desc:'Performance and scientific benchmarks. Overhead profiling, lead-time advantage measurement, IES computation. Results stored as JSON for CI regression tracking.',
+   exports:[], badge:null},
+
+  {type:'file', name:'overhead_profile.py', indent:2, path:'benchmarks/overhead_profile.py', badge:'test',
+   desc:'Measures MoEWatch forward+backward hook overhead vs unmonitored baseline. Runs 500 timed iterations. Reports mean latency, p95 latency, tokens/sec, peak GPU memory delta. Target: <3% overhead on forward pass, <5% on backward. Outputs overhead_results.json.',
+   exports:[], deps:[]},
+
+  {type:'file', name:'lead_time_benchmark.py', indent:2, path:'benchmarks/lead_time_benchmark.py', badge:'exp',
+   desc:'Measures T_moewatch vs T_utilization vs T_entropy vs T_aux_loss across 20 training runs with different random seeds. Computes mean and std of lead-time advantage for each baseline. Core empirical proof of the paper claim. Outputs lead_time_results.json.',
+   exports:[], deps:[]},
+
+  {type:'file', name:'ies_benchmark.py', indent:2, path:'benchmarks/ies_benchmark.py', badge:'exp',
+   desc:'Measures Intervention Efficiency Score = stability_improvement / intervention_cost across all action types. Runs controlled experiments: train with MoEWatch interventions vs train without. Computes dead expert rate reduction, loss trajectory deviation, compute overhead. Outputs ies_results.json.',
+   exports:[], deps:[]},
+
+  {type:'file', name:'synthetic_collapse_injector.py', indent:2, path:'benchmarks/synthetic_collapse_injector.py', badge:'exp',
+   desc:'Synthetic collapse injection framework. Programmatically forces routing collapse at a known step by biasing router weights. Used to create ground-truth collapse events for lead-time benchmark. Supports: gradual collapse, sudden collapse, multi-layer cascade collapse. Critical for reproducible benchmarks without waiting for natural collapse.',
+   exports:['CollapseInjector','CollapseProfile'],
+   deps:[]},
+
+  // ── EXPERIMENTS ───────────────────────────────────────────────────
+  {type:'dir', name:'experiments/', indent:1, path:'experiments/',
+   desc:'Paper experiment scripts. Reproducible runs that generate all tables and figures in the MoEWatch research paper.',
+   exports:[], badge:'exp'},
+
+  {type:'file', name:'README.md', indent:2, path:'experiments/README.md', badge:'doc',
+   desc:'Experiment reproduction guide. Hardware requirements, estimated runtime, how to run each experiment, expected outputs, how to regenerate paper figures from result JSON files.',
+   exports:[], deps:[]},
+
+  {type:'file', name:'exp1_lead_time_advantage.py', indent:2, path:'experiments/exp1_lead_time_advantage.py', badge:'exp',
+   desc:'Experiment 1: Lead-time advantage across model families. Trains small MoE (4 experts, 6 layers) on Wikitext-103. Lets collapse happen naturally. Records T for MoEWatch, utilization baseline, entropy baseline, aux loss baseline. Generates Table 1 of paper.',
+   exports:[], deps:[]},
+
+  {type:'file', name:'exp2_signal_hierarchy.py', indent:2, path:'experiments/exp2_signal_hierarchy.py', badge:'exp',
+   desc:'Experiment 2: Validates empirical signal ordering (Tier 1 earliest, Tier 3 latest). Measures information gain of each signal at each time step before collapse. Generates Figure 2 of paper (signal lead-time distribution plot).',
+   exports:[], deps:[]},
+
+  {type:'file', name:'exp3_intervention_efficacy.py', indent:2, path:'experiments/exp3_intervention_efficacy.py', badge:'exp',
+   desc:'Experiment 3: Intervention efficacy comparison. Compares: no intervention, rule policy, bandit policy, oracle policy (always optimal in hindsight). Metric: dead expert rate at end of training. Generates Table 2 and Figure 3.',
+   exports:[], deps:[]},
+
+  {type:'file', name:'exp4_counterfactual_attribution.py', indent:2, path:'experiments/exp4_counterfactual_attribution.py', badge:'exp',
+   desc:'Experiment 4: Validates counterfactual baseline. Shows naive reward assignment (no baseline) misattributes credit vs intervention-conditioned baseline. Compares policy learning quality with and without BaselineTracker. Generates Figure 4.',
+   exports:[], deps:[]},
+
+  {type:'file', name:'exp5_overhead_analysis.py', indent:2, path:'experiments/exp5_overhead_analysis.py', badge:'exp',
+   desc:'Experiment 5: Computational overhead analysis. Measures wall-clock overhead per model size (small, medium, large MoE). Generates overhead table for paper appendix. Validates <3% forward overhead claim.',
+   exports:[], deps:[]},
+
+  // ── EXAMPLES ──────────────────────────────────────────────────────
+  {type:'dir', name:'examples/', indent:1, path:'examples/',
+   desc:'Runnable end-to-end example scripts for real-world MoE models. Self-contained, annotated, beginner-friendly.',
+   exports:[], badge:null},
+
+  {type:'file', name:'mixtral_training_monitor.py', indent:2, path:'examples/mixtral_training_monitor.py', badge:'doc',
+   desc:'Mixtral 8x7B live training monitor. Attach MoEWatch to HuggingFace Trainer, enable intervention engine, run 1000 steps, print WatchReport summary. Shows: routing health dashboard, any interventions fired, policy decisions.',
+   exports:[], deps:[]},
+
+  {type:'file', name:'deepseek_audit.py', indent:2, path:'examples/deepseek_audit.py', badge:'doc',
+   desc:'DeepSeek-MoE offline audit. Load pretrained model, run audit() on validation set, inspect AuditReport for dead experts and gradient starvation. Shows manual router module override for non-standard naming.',
+   exports:[], deps:[]},
+
+  {type:'file', name:'qwen3_moe_finetune.py', indent:2, path:'examples/qwen3_moe_finetune.py', badge:'doc',
+   desc:'Qwen3-MoE fine-tuning with MoEWatch. Shows MoEWatch during SFT fine-tuning, where collapse from domain shift is a real risk. Demonstrates intervention firing during fine-tuning, not just pretraining.',
+   exports:[], deps:[]},
+
+  {type:'file', name:'custom_moe_example.py', indent:2, path:'examples/custom_moe_example.py', badge:'doc',
+   desc:'Custom PyTorch MoE architecture integration. Shows WatchConfig(router_modules=[...]) manual override for architectures that do not match auto-detection patterns. Minimal MoE implementation included for reference.',
+   exports:[], deps:[]},
+
+  {type:'file', name:'json_output_pipeline.py', indent:2, path:'examples/json_output_pipeline.py', badge:'doc',
+   desc:'JSONReporter integration example. Pipes MoEWatch JSON output to a file, then reads it with pandas for post-hoc analysis. Shows how to build a lightweight routing health dashboard using matplotlib.',
+   exports:[], deps:[]},
+
+  // ── NOTEBOOKS ─────────────────────────────────────────────────────
+  {type:'dir', name:'notebooks/', indent:1, path:'notebooks/',
+   desc:'Interactive Colab and Jupyter notebooks for demos and paper figure reproduction.',
+   exports:[], badge:null},
+
+  {type:'file', name:'quickstart_colab.ipynb', indent:2, path:'notebooks/quickstart_colab.ipynb', badge:'doc',
+   desc:'Primary Colab demo. Runs on free T4 GPU. Loads OLMoE-1B-7B, attaches MoEWatch with intervention enabled, runs 200 training steps, renders full routing health dashboard. Includes synthetic collapse demo that runs on CPU without model download.',
+   exports:[], deps:[]},
+
+  {type:'file', name:'synthetic_collapse_demo.ipynb', indent:2, path:'notebooks/synthetic_collapse_demo.ipynb', badge:'doc',
+   desc:'CPU-only interactive demo. Creates tiny MoE, uses CollapseInjector to force collapse at step 500, shows MoEWatch detecting Tier 1 signal at step ~320 (180 steps early), intervention firing at step 350, routing recovery by step 600. Visualizes all three tier signals over time.',
+   exports:[], deps:[]},
+
+  {type:'file', name:'paper_figures.ipynb', indent:2, path:'notebooks/paper_figures.ipynb', badge:'doc',
+   desc:'Notebook that reads experiment result JSON files and generates all paper figures. Fully reproducible figure generation. Figures: signal lead-time distributions, intervention efficacy comparison, overhead analysis, counterfactual attribution validation.',
+   exports:[], deps:[]},
+
+  // ── DOCS ──────────────────────────────────────────────────────────
+  {type:'dir', name:'docs/', indent:1, path:'docs/',
+   desc:'MkDocs documentation source. Deployed to GitHub Pages. Covers: quickstart, API reference, architecture, research background, contribution guide.',
+   exports:[], badge:null},
+
+  {type:'file', name:'mkdocs.yml', indent:2, path:'mkdocs.yml', badge:'doc',
+   desc:'MkDocs configuration. Theme: Material for MkDocs (dark mode default). Nav structure: Getting Started, API Reference, Architecture, Research, Contributing. Plugins: mkdocstrings (auto API docs from docstrings).',
+   exports:[], deps:[]},
+
+  {type:'file', name:'index.md', indent:2, path:'docs/index.md', badge:'doc',
+   desc:'Documentation home page. Problem statement, solution overview, quick install, 5-line usage example, link to Colab demo. First page new users see.',
+   exports:[], deps:[]},
+
+  {type:'file', name:'architecture.md', indent:2, path:'docs/architecture.md', badge:'doc',
+   desc:'Architecture deep-dive. Explains all seven components: OBSERVE/PREDICT/ATTRIBUTE/PROPOSE/SELECT/APPLY/LEARN. Signal tier hierarchy. Counterfactual baseline design. Policy phases. Diagrams included.',
+   exports:[], deps:[]},
+
+  {type:'file', name:'api_reference.md', indent:2, path:'docs/api_reference.md', badge:'doc',
+   desc:'Full API reference. Auto-generated from docstrings via mkdocstrings. Covers: MoEWatch, audit, WatchConfig, all analyzers, all intervention actions, policy classes, report classes.',
+   exports:[], deps:[]},
+
+  {type:'file', name:'research.md', indent:2, path:'docs/research.md', badge:'doc',
+   desc:'Research context page. Problem statement, novelty claims, related work comparison, evaluation metrics (lead-time, IES), experiment results summary, citation.',
+   exports:[], deps:[]},
+
+  {type:'file', name:'contributing.md', indent:2, path:'docs/contributing.md', badge:'doc',
+   desc:'Contributor guide. Dev setup, running tests, code style (ruff + mypy), adding new signal analyzers, adding new intervention actions, adding new model family support. Includes architecture diagram for contributors.',
+   exports:[], deps:[]},
+
+  // ── ROOT FILES ────────────────────────────────────────────────────
+  {type:'file', name:'pyproject.toml', indent:1, path:'pyproject.toml', badge:'ci',
+   desc:'PEP 517 build config. Build backend: hatchling. Dependencies: torch>=2.0, numpy. Optional: transformers (for HF integration). Dev extras: pytest, pytest-cov, ruff, mypy, mkdocs-material, mkdocstrings. Version: 2.0.0. Package metadata: homepage, license, keywords.',
+   exports:[], deps:[]},
+
+  {type:'file', name:'README.md', indent:1, path:'README.md', badge:'doc',
+   desc:'Primary GitHub README. Sections: one-liner, badges (PyPI, CI, coverage, license), problem statement (routing collapse), what MoEWatch does (predict+intervene+learn), 5-line usage example, architecture overview, signal tier table, installation, links to paper/docs/Colab.',
+   exports:[], deps:[]},
+
+  {type:'file', name:'CONTRIBUTING.md', indent:1, path:'CONTRIBUTING.md', badge:'doc',
+   desc:'Contribution guide at repo root. Quick version of docs/contributing.md. Points to full guide. Includes: how to file bugs, how to propose features, code style, PR checklist, CLA info.',
+   exports:[], deps:[]},
+
+  {type:'file', name:'LICENSE', indent:1, path:'LICENSE', badge:null,
+   desc:'Apache 2.0 License. Chosen for: compatibility with PyTorch (Apache 2.0) and HuggingFace Transformers (Apache 2.0). Allows commercial use, modification, distribution, and patent use.',
+   exports:[], deps:[]},
+
+  {type:'file', name:'CITATION.cff', indent:1, path:'CITATION.cff', badge:'doc',
+   desc:'Citation metadata file (Citation File Format). Allows GitHub to show "Cite this repository" button. Contains: title, authors, version, DOI (once paper is published), preferred citation format.',
+   exports:[], deps:[]},
+
+  {type:'file', name:'.ruff.toml', indent:1, path:'.ruff.toml', badge:'ci',
+   desc:'Ruff linter config. Rules: E, F, I (isort), UP (pyupgrade), B (flake8-bugbear). Line length: 100. Target Python: 3.9. Per-file ignores for test files.',
+   exports:[], deps:[]},
+
+  {type:'file', name:'mypy.ini', indent:1, path:'mypy.ini', badge:'ci',
+   desc:'MyPy type checker config. Strict mode enabled. Ignores: missing stubs for torch (handled by torch-stubs). Per-module ignores for test files. Runs in CI on every push.',
+   exports:[], deps:[]},
+
+  {type:'file', name:'.gitignore', indent:1, path:'.gitignore', badge:'ci',
+   desc:'Standard Python gitignore. Excludes: __pycache__, *.egg-info, dist/, build/, .pytest_cache, .mypy_cache, .ruff_cache, *.json result files from benchmarks (tracked separately), model weights.',
+   exports:[], deps:[]},
+
+];
+
+// ═══════════════════════════════════════════════════════════════════
+// RENDER ENGINE
+// ═══════════════════════════════════════════════════════════════════
+
+const treeEl = document.getElementById('tree');
+const dpPath = document.getElementById('dp-path');
+const dpName = document.getElementById('dp-name');
+const dpBadges = document.getElementById('dp-badges');
+const dpBody = document.getElementById('dp-body');
+
+let activeId = null;
+
+function fileIcon(node) {
+  if (node.type === 'dir') {
+    return `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--amber)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>`;
+  }
+  const n = node.name;
+  if (n.endsWith('.py')) return `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>`;
+  if (n.endsWith('.yml') || n.endsWith('.yaml')) return `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--cyan)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4"/></svg>`;
+  if (n.endsWith('.md')) return `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--purple)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>`;
+  if (n.endsWith('.ipynb')) return `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--green)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>`;
+  if (n.endsWith('.toml') || n.endsWith('.ini') || n.endsWith('.cfg')) return `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text3)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 010 14.14M4.93 4.93a10 10 0 000 14.14"/></svg>`;
+  return `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text3)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>`;
+}
+
+function badgeHtml(b) {
+  if (!b) return '';
+  const map = { core:'b-core', new:'b-new', test:'b-test', doc:'b-doc', ci:'b-ci', exp:'b-exp' };
+  return `<span class="badge ${map[b]||'b-doc'}">${b}</span>`;
+}
+
+function indentStr(n) {
+  if (n === 0) return '';
+  return '  '.repeat(n - 1) + '├─ ';
+}
+
+function renderTree(filter = '') {
+  treeEl.innerHTML = '';
+  const q = filter.toLowerCase().trim();
+  const visible = q
+    ? TREE.filter(n => n.name.toLowerCase().includes(q) || n.desc.toLowerCase().includes(q) || (n.exports||[]).join(' ').toLowerCase().includes(q))
+    : TREE;
+
+  if (!visible.length) {
+    treeEl.innerHTML = '<div class="no-results">No files match.</div>';
+    return;
+  }
+
+  visible.forEach((node, i) => {
+    const row = document.createElement('div');
+    row.className = 'row' + (node.path === activeId ? ' active' : '');
+    row.innerHTML = `
+      <span class="row-indent">${indentStr(node.indent)}</span>
+      <span class="row-icon">${fileIcon(node)}</span>
+      <span class="row-name${node.type==='dir'?' is-dir':''}${node.badge==='new'?' is-new':''}">${node.name}</span>
+      ${badgeHtml(node.badge)}
+    `;
+    row.addEventListener('click', () => selectNode(node, row));
+    treeEl.appendChild(row);
+  });
+}
+
+function selectNode(node, row) {
+  document.querySelectorAll('.row').forEach(r => r.classList.remove('active'));
+  row.classList.add('active');
+  activeId = node.path;
+
+  dpPath.textContent = node.path;
+  dpName.textContent = node.name;
+  dpBadges.innerHTML = badgeHtml(node.badge) + (node.type === 'dir' ? '<span style="font-size:10px;color:var(--text3);margin-left:6px;">directory</span>' : '');
+
+  let html = '';
+
+  html += `<div class="detail-section">
+    <div class="detail-section-label">Purpose</div>
+    <div class="detail-desc">${node.desc}</div>
+  </div>`;
+
+  if (node.exports && node.exports.length) {
+    html += `<div class="divider"></div>
+    <div class="detail-section">
+      <div class="detail-section-label">Exports / Public API</div>
+      <div class="exports-list">
+        ${node.exports.map(e => `<span class="export-tag">${e}</span>`).join('')}
+      </div>
+    </div>`;
+  }
+
+  if (node.deps && node.deps.length) {
+    html += `<div class="divider"></div>
+    <div class="detail-section">
+      <div class="detail-section-label">Internal Dependencies</div>
+      <div class="deps-list">
+        ${node.deps.map(d => `<div class="dep-item"><span class="dep-arrow">→</span>${d}</div>`).join('')}
+      </div>
+    </div>`;
+  }
+
+  dpBody.innerHTML = html;
+}
+
+// Stats
+const totalFiles = TREE.filter(n => n.type === 'file').length;
+const totalNew = TREE.filter(n => n.badge === 'new').length;
+const totalModules = TREE.filter(n => n.type === 'dir').length;
+document.getElementById('total-files').textContent = totalFiles;
+document.getElementById('total-new').textContent = '+' + totalNew;
+document.getElementById('total-modules').textContent = totalModules;
+
+document.getElementById('search').addEventListener('input', e => renderTree(e.target.value));
+renderTree();
+</script>
+</body>
+</html>

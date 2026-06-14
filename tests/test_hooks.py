@@ -618,3 +618,165 @@ class TestPartialAttachCleanup:
             f"Leaked {len(manager._handles)} hook handle(s) after failed attach()"
         )
         assert manager.is_attached() is False
+
+# ===========================================================================
+# ── 10. RouterForwardHook internal helpers & defensive branches ────────────
+# ===========================================================================
+
+def test_extract_logits_tensor():
+    logits = torch.randn(2, 4)
+
+    result = RouterForwardHook._extract_logits(logits)
+
+    assert result is logits
+
+
+def test_extract_logits_tuple():
+    logits = torch.randn(2, 4)
+
+    result = RouterForwardHook._extract_logits(("foo", logits))
+
+    assert result is logits
+
+
+def test_extract_logits_dict():
+    logits = torch.randn(2, 4)
+
+    result = RouterForwardHook._extract_logits(
+        {"router_logits": logits}
+    )
+
+    assert result is logits
+
+
+def test_extract_logits_object_attr():
+    class Output:
+        pass
+
+    out = Output()
+    out.router_logits = torch.randn(2, 4)
+
+    result = RouterForwardHook._extract_logits(out)
+
+    assert result is out.router_logits
+
+
+def test_extract_logits_none():
+    result = RouterForwardHook._extract_logits({"bad": 123})
+
+    assert result is None
+
+
+def test_infer_top_k_attr():
+    module = nn.Linear(4, 4)
+    module.top_k = 3
+
+    assert RouterForwardHook._infer_top_k(module, 8) == 3
+
+
+def test_infer_top_k_clamped():
+    module = nn.Linear(4, 4)
+    module.top_k = 999
+
+    assert RouterForwardHook._infer_top_k(module, 4) == 4
+
+
+def test_infer_top_k_default():
+    module = nn.Linear(4, 4)
+
+    assert RouterForwardHook._infer_top_k(module, 8) == 1
+
+
+def test_select_top_k():
+    logits = torch.tensor([[1.0, 5.0, 3.0]])
+
+    indices = RouterForwardHook._select_top_k(
+        logits,
+        top_k=2,
+    )
+
+    assert indices.shape[-1] == 2
+    assert 1 in indices[0]
+
+
+def test_router_hook_set_global_step(
+    stat_collector,
+    default_config,
+):
+    hook = RouterForwardHook(
+        "layer",
+        stat_collector,
+        default_config,
+    )
+
+    hook.set_global_step(123)
+
+    assert hook._global_step == 123
+
+
+def test_hook_skips_1d_logits(
+    stat_collector,
+    default_config,
+):
+    hook = RouterForwardHook(
+        "layer",
+        stat_collector,
+        default_config,
+    )
+
+    module = nn.Linear(4, 4)
+
+    hook(
+        module,
+        (),
+        torch.randn(4),
+    )
+
+
+def test_hook_handles_stat_collector_exception(
+    default_config,
+):
+    collector = MagicMock()
+    collector.write_routing_event.side_effect = RuntimeError("boom")
+
+    hook = RouterForwardHook(
+        "layer",
+        collector,
+        default_config,
+    )
+
+    logits = torch.randn(2, 4)
+
+    hook(
+        nn.Linear(4, 4),
+        (),
+        logits,
+    )
+
+
+def test_hook_writes_routing_event(
+    default_config,
+):
+    collector = MagicMock()
+
+    hook = RouterForwardHook(
+        "layer",
+        collector,
+        default_config,
+    )
+
+    logits = torch.randn(3, 8)
+
+    hook(
+        nn.Linear(8, 8),
+        (),
+        logits,
+    )
+
+    collector.write_routing_event.assert_called_once()
+
+    event = collector.write_routing_event.call_args[0][0]
+
+    assert isinstance(event, RoutingEvent)
+    assert event.expert_count == 8
+    assert event.batch_size == 3

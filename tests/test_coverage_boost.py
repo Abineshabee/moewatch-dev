@@ -1658,3 +1658,100 @@ class TestCLIReporter:
         result = reporter.render_alert(alert)
         assert "layers.0.gate" in result
         assert "collapse imminent" in result
+
+# ------------------------------------------------------------------
+# __init__.py coverage
+# ------------------------------------------------------------------
+
+from unittest.mock import MagicMock, patch
+import moewatch
+import importlib
+import warnings
+
+
+def test_alert_str_and_dict():
+    alert = Alert(
+        step=10,
+        level=moewatch.AlertLevel.WARNING,
+        layer_id="layer.0",
+        signal_type="entropy",
+        message="test",
+        metrics={"score": 0.5},
+    )
+
+    s = str(alert)
+
+    assert "step=10" in s
+    assert "layer.0" in s
+    assert "entropy" in s
+
+    d = alert.to_dict()
+
+    assert d["step"] == 10
+    assert d["level"] == moewatch.AlertLevel.WARNING.value
+    assert d["layer_id"] == "layer.0"
+    assert d["signal_type"] == "entropy"
+    assert d["message"] == "test"
+    assert d["metrics"] == {"score": 0.5}
+
+
+def test_require_torch_failure(monkeypatch):
+    monkeypatch.setattr(moewatch, "_TORCH_AVAILABLE", False)
+
+    with pytest.raises(ImportError):
+        moewatch._require_torch("test")
+
+
+def test_require_transformers_failure(monkeypatch):
+    monkeypatch.setattr(moewatch, "_TRANSFORMERS_AVAILABLE", False)
+
+    with pytest.raises(ImportError):
+        moewatch._require_transformers("test")
+
+
+def test_getattr_invalid():
+    with pytest.raises(AttributeError):
+        getattr(moewatch, "does_not_exist")
+
+
+def test_public_api_exports():
+    expected = {
+        "MoEWatch",
+        "MoEWatchCallback",
+        "audit",
+        "WatchConfig",
+        "OutputMode",
+        "AlertLevel",
+        "Alert",
+        "__version__",
+        "__author__",
+        "__license__",
+        "__repository__",
+    }
+
+    assert expected.issubset(set(moewatch.__all__))
+
+
+def test_metadata_constants():
+    assert isinstance(moewatch.__version__, str)
+    assert isinstance(moewatch.__author__, str)
+    assert isinstance(moewatch.__license__, str)
+    assert isinstance(moewatch.__repository__, str)
+
+
+def test_no_color_flag_exists():
+    assert isinstance(moewatch._NO_COLOR, bool)
+
+def test_getattr_audit_success():
+    obj = moewatch.__getattr__("audit")
+    assert callable(obj)
+
+
+def test_getattr_moewatch_success():
+    obj = moewatch.__getattr__("MoEWatch")
+    assert obj is not None
+
+
+def test_getattr_moewatch_callback_success():
+    obj = moewatch.__getattr__("MoEWatchCallback")
+    assert obj is not None

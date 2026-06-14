@@ -1,0 +1,3310 @@
+╔════════════════════════════════════════════════════════════════════════════════╗
+║                    MOEWATCH CORE LIBRARY — COMPLETE ARCHITECTURE               ║
+║                     Pre-Defined Schema & File Metadata                         ║
+║                                                                                ║
+║  Version: v0.2.0                                                               ║
+║  Author: Abinesh N (@Abineshabee)                                              ║
+║  Repository: github.com/Abineshabee/MoEWatch                                   ║
+║                                                                                ║
+║  Purpose: Use this document to quickly understand all file purposes,           ║
+║  function signatures, class definitions, exports, and dependencies             ║
+║  without reading actual code. Reference before writing new code.               ║
+╚════════════════════════════════════════════════════════════════════════════════╝
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STRUCTURE OVERVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+moewatch/
+├── __init__.py                     → Public API surface
+├── _watcher.py                     → Main MoEWatch class (live monitoring)
+├── _audit.py                       → audit() offline diagnostic function
+├── config.py                       → WatchConfig dataclass & enums
+│
+├── hooks/
+│   ├── __init__.py                 → Re-exports hook classes
+│   ├── manager.py                  → HookManager (attach/detach lifecycle)
+│   ├── router_hook.py              → RouterForwardHook (forward hooks)
+│   ├── gradient_hook.py            → GradientStarvationHook (backward hooks) [v0.2.0]
+│   └── detection.py                → detect_router_modules() auto-detection
+│
+├── collector/
+│   ├── __init__.py                 → Re-exports collector classes
+│   ├── ring_buffer.py              → RingBuffer (fixed-size circular buffer)
+│   ├── stat_collector.py           → StatCollector (aggregates routing & gradient events)
+│   └── baseline_tracker.py         → BaselineTracker (counterfactual baseline) [v0.2.0]
+│
+├── analyzer/
+│   ├── __init__.py                 → Re-exports analyzers
+│   ├── entropy.py                  → EntropyAnalyzer (Tier 2 signal)
+│   ├── collapse.py                 → CollapseDetector (expert health states)
+│   ├── gradient_starvation.py      → GradientStarvationAnalyzer (Tier 1) [v0.2.0]
+│   ├── cross_layer.py              → CrossLayerCorrelation (Tier 3) [v0.2.0]
+│   ├── risk_score.py               → RiskScoreFuser (fusion to risk_score) [v0.2.0]
+│   └── cusum.py                    → CUSUM detector (change-point detection) [v0.2.0]
+│
+├── intervention/
+│   ├── __init__.py                 → Re-exports intervention classes
+│   ├── engine.py                   → InterventionEngine (apply actions) [v0.2.0]
+│   ├── actions.py                  → AuxLossAction, RouterNoiseAction, ... [v0.2.0]
+│   └── safety.py                   → SafetyGuard (pre-flight checks) [v0.2.0]
+│
+├── policy/
+│   ├── __init__.py                 → Re-exports policy classes
+│   ├── base.py                     → PolicyBase (abstract interface) [v0.2.0]
+│   ├── rule_policy.py              → RulePolicy (Phase 1 deterministic) [v0.2.0]
+│   ├── bandit_policy.py            → BanditPolicy (Phase 2 learning) [v0.2.0]
+│   ├── memory.py                   → PolicyMemory (experience replay) [v0.2.0]
+│   └── reward.py                   → RewardComputer (discounted reward) [v0.2.0]
+│
+└── report/
+    ├── __init__.py                 → Re-exports report classes
+    ├── audit_report.py             → AuditReport (offline diagnostic result)
+    ├── watch_report.py             → WatchReport (live training report) [v0.2.0]
+    ├── cli_reporter.py             → CLIReporter (ANSI terminal output)
+    └── json_reporter.py            → JSONReporter (newline-delimited JSON) [v0.2.0]
+
+tests/
+    ├── conftest.py                 → Pytest fixtures
+    ├── test_detection.py           → Tests detect_router_modules() against
+    ├── test_hooks.py               → Tests HookManager
+    ├── test_collector.py           → Tests RingBuffer capacity wrapping (old events evicted)
+    ├── test_entropy.py             → Tests EntropyAnalyzer
+    ├── test_collapse.py            → Injects synthetic expert utilization
+    ├── test_gradient_starvation.py → GradientStarvationAnalyzer
+    ├── test_cross_layer.py         → Tests CrossLayerCorrelation
+    ├── test_risk_score.py          → Tests RiskScoreFuser
+    ├── test_baseline_tracker.py    → Tests BaselineTracker
+    ├── test_policy.py              → Tests RulePolicy
+    ├── test_intervention.py        → Tests InterventionEngine
+    ├── test_watcher.py             → Integration test for MoEWatch end-to-end
+    ├── test_cli_reporter.py        → Targets both the Rich rendering and the plain-text fallback path
+    ├── test_coverage_boost.py      → Supplementary coverage-focused tests targeting modules that were under-tested
+    └── test_audit.py               → Integration test for audit() end-to-end on CPU
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 1: TOP-LEVEL FILES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+FILE: moewatch/__init__.py
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE
+  Public API surface. Lazy imports for fast startup. Guards for torch and
+  transformers availability. NO_COLOR environment variable support.
+  This is what users import: `from moewatch import MoEWatch, audit, WatchConfig`
+
+EXPORTS (Public API)
+  - MoEWatch                (class) — main monitoring class
+  - MoEWatchCallback        (class) — HuggingFace Trainer callback
+  - audit                   (function) — offline diagnostic
+  - WatchConfig             (dataclass) — configuration container
+  - OutputMode              (enum) — output format type
+  - AlertLevel              (enum) — alert severity level
+  - Alert                   (dataclass) — individual alert object
+  - __version__             (str) — version identifier
+
+DEPENDENCIES
+  → moewatch/_watcher.py
+  → moewatch/_audit.py
+  → moewatch/config.py
+
+IMPLEMENTATION NOTES
+  - Use lazy imports: `from . import _watcher` inside functions to defer loading
+  - Check `torch` and `transformers` availability at import time
+  - Respect NO_COLOR env var: if set, disable all ANSI colors
+  - Guard imports with try/except to provide helpful error messages if deps missing
+
+────────────────────────────────────────────────────────────────────────────────
+
+FILE: moewatch/config.py
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE
+  Central configuration dataclass. All tunable parameters in one place.
+  This is the single source of truth for all configuration options.
+
+ENUMS
+
+  OutputMode (enum)
+    - SILENT       : No output
+    - CLI          : ANSI terminal output
+    - JSON         : Newline-delimited JSON
+
+  AlertLevel (enum)
+    - INFO         : Informational
+    - WARNING      : Warning-level alert
+    - CRITICAL     : Critical alert
+
+DATACLASS: WatchConfig
+────────────────────────────────────────────────────────────────────────────────
+  Fields (all with type hints and defaults):
+
+  SIGNAL THRESHOLDS
+    dead_threshold: float = 0.01
+      Gradient norm below this → expert marked DEAD
+
+    cold_threshold: float = 0.05
+      Gradient norm below this → expert marked COLD
+
+    cold_steps_limit: int = 50
+      Consecutive steps as COLD before promotion to DEAD
+
+    entropy_warn: float = 0.3
+      Normalized entropy below this → WARNING level
+
+    entropy_critical: float = 0.15
+      Normalized entropy below this → CRITICAL level
+
+    entropy_drop_warn: float = 0.1
+      Entropy drop rate above this (per step) → WARNING
+
+    load_imbalance_warn: float = 3.0
+      Load imbalance ratio (max/mean) above this → WARNING
+
+    load_imbalance_error: float = 5.0
+      Load imbalance ratio above this → CRITICAL
+
+  COLLECTION & MONITORING
+    log_every: int = 10
+      Emit reports every N steps
+
+    sample_every: int = 10
+      Sample gradient hooks every N steps (to reduce overhead)
+
+    output: OutputMode = OutputMode.CLI
+      Output format: SILENT, CLI, or JSON
+
+  BEHAVIOR
+    no_color: bool = False
+      Disable ANSI colors in CLI output
+
+    router_modules: list[str] | None = None
+      Manual override for router module names if auto-detection fails
+
+    intervention_enabled: bool = True
+      Enable intervention engine
+
+    policy_type: str = "rule"
+      "rule" (Phase 1) or "bandit" (Phase 2)
+
+  POLICY PARAMETERS (Phase 2 Bandit)
+    bandit_epsilon: float = 0.1
+      Exploration rate (epsilon-greedy)
+
+    reward_discount_gamma: float = 0.95
+      Discount factor for delayed rewards
+
+    reward_window_steps: int = 50
+      Observation window for reward computation
+
+  BASELINE TRACKER
+    baseline_min_clean_steps: int = 20
+      Minimum clean (non-intervention) history steps before baseline valid
+
+    baseline_exclusion_window: int = 100
+      Steps to exclude after intervention before using baseline again
+
+  INTERVENTION SAFETY
+    intervention_cooldown: int = 200
+      Minimum steps between interventions on same layer
+
+    intervention_max_delta: float = 0.1
+      Maximum change to any hyperparameter per intervention
+
+    loss_guard_threshold: float = 1.5
+      Spike factor above baseline loss to freeze interventions
+
+METHODS
+
+  __post_init__() → None
+    Validates all config values on construction. Raises ValueError if invalid.
+
+DEPENDENCIES
+  None (pure dataclass, no external deps)
+
+IMPLEMENTATION NOTES
+  - Use @dataclass decorator from dataclasses module
+  - All numeric fields should have sensible defaults
+  - Implement __post_init__() to validate:
+    * 0.0 < entropy_warn < 1.0
+    * cold_threshold > dead_threshold
+    * entropy_drop_warn > 0
+    * policy_type in ["rule", "bandit"]
+    * output in OutputMode enum values
+
+────────────────────────────────────────────────────────────────────────────────
+
+FILE: moewatch/_watcher.py
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE
+  Main MoEWatch class. Manages full lifecycle of live training-time monitoring.
+  Coordinates HookManager, StatCollector, all analyzers, intervention engine,
+  and policy. This is the primary user-facing class.
+
+CLASS: MoEWatch
+────────────────────────────────────────────────────────────────────────────────
+
+  DOCSTRING
+    """
+    Live training-time MoE routing collapse monitor and intervention controller.
+
+    Attaches to a HuggingFace Trainer and monitors routing health at each
+    training step. Emits alerts and can apply corrective interventions to live
+    training hyperparameters. Zero weight modification guarantee.
+
+    Usage:
+        config = WatchConfig(output=OutputMode.CLI)
+        watch = MoEWatch(model, config)
+        watch.attach(trainer)
+        trainer.train()
+        watch.stop()
+
+    Or as context manager:
+        with MoEWatch(model, config) as watch:
+            watch.attach(trainer)
+            trainer.train()
+    """
+
+  ATTRIBUTES
+    model: torch.nn.Module
+      Reference to the MoE model being monitored (immutable)
+
+    config: WatchConfig
+      Configuration object (read-only after init)
+
+    hook_manager: HookManager
+      Manages all forward/backward hooks
+
+    stat_collector: StatCollector
+      Aggregates routing and gradient events
+
+    baseline_tracker: BaselineTracker
+      Tracks intervention-conditioned baselines
+
+    entropy_analyzer: EntropyAnalyzer
+      Tier 2 signal detection
+
+    collapse_detector: CollapseDetector
+      Expert health state tracking
+
+    gradient_analyzer: GradientStarvationAnalyzer
+      Tier 1 signal detection (v0.2.0)
+
+    cross_layer_analyzer: CrossLayerCorrelation
+      Tier 3 signal detection (v0.2.0)
+
+    risk_fuser: RiskScoreFuser
+      Fuses signals into risk_score (v0.2.0)
+
+    intervention_engine: InterventionEngine
+      Applies interventions to running training (v0.2.0)
+
+    policy: PolicyBase (RulePolicy or BanditPolicy)
+      Selects which intervention to apply (v0.2.0)
+
+    alerts: list[Alert]
+      History of all alerts emitted this session
+
+    _running: bool
+      Internal flag indicating monitoring state
+
+    _global_step: int
+      Current training step counter
+
+  METHODS
+
+    __init__(model: torch.nn.Module, config: WatchConfig = None)
+      Args:
+        model (torch.nn.Module) — MoE model to monitor
+        config (WatchConfig) — configuration (uses defaults if None)
+      Returns:
+        None
+      Raises:
+        ValueError if model has no detectable MoE routers
+
+    start() → None
+      Args: None
+      Returns: None
+      Docstring: "Initialize hooks and collectors. Must be called before attach()."
+      Side effects: Attaches hooks to detected router modules
+
+    stop() → None
+      Args: None
+      Returns: None
+      Docstring: "Detach all hooks and cleanup resources. Call at end of training."
+      Side effects: Removes all registered hooks, stops monitoring
+
+    attach(trainer: transformers.Trainer) → "MoEWatchCallback"
+      Args:
+        trainer (transformers.Trainer) — HuggingFace Trainer instance
+      Returns:
+        MoEWatchCallback — callback object for internal use
+      Docstring: "Register MoEWatch as a HuggingFace training callback."
+      Side effects: Calls trainer.add_callback()
+
+    step(global_step: int) → WatchReport
+      Args:
+        global_step (int) — current training step number
+      Returns:
+        WatchReport — report with current risk scores, alerts, interventions
+      Docstring: "Process one training step. Called by callback at each step."
+      Side effects:
+        - Collects latest stats from StatCollector
+        - Runs all analyzers
+        - Fuses signals into risk_score
+        - Selects and applies interventions if enabled
+        - Emits alerts if thresholds crossed
+
+    get_alerts(since_step: int = 0) → list[Alert]
+      Args:
+        since_step (int) — return only alerts after this step (default 0)
+      Returns:
+        list[Alert] — filtered alert history
+      Docstring: "Retrieve alert history since given step."
+
+    __enter__() → "MoEWatch"
+      Returns: self
+      Docstring: "Context manager entry. Calls start()."
+      Side effects: Calls start()
+
+    __exit__(exc_type, exc_val, exc_tb) → None
+      Returns: None
+      Docstring: "Context manager exit. Calls stop() regardless of exception."
+      Side effects: Calls stop()
+
+CLASS: MoEWatchCallback
+────────────────────────────────────────────────────────────────────────────────
+  DOCSTRING: "HuggingFace Trainer callback that calls MoEWatch.step() after each step."
+
+  ATTRIBUTES
+    moewatch: MoEWatch
+      Reference to parent MoEWatch instance
+
+  METHODS
+    __init__(moewatch: MoEWatch)
+      Args:
+        moewatch (MoEWatch) — parent monitor instance
+      Returns: None
+
+    on_step_end(args, state, control, **kwargs) → None
+      Args:
+        args — TrainerState
+        state — TrainerState
+        control — TrainerControl
+        **kwargs — additional args
+      Returns: None
+      Docstring: "Called by Trainer after each training step."
+      Side effects: Calls moewatch.step(state.global_step)
+
+DATACLASS: Alert
+────────────────────────────────────────────────────────────────────────────────
+  DOCSTRING: "Individual alert emitted by MoEWatch."
+
+  Fields:
+    step: int
+      Training step when alert was emitted
+
+    level: AlertLevel
+      Severity (INFO, WARNING, CRITICAL)
+
+    layer_id: str
+      Affected MoE layer name
+
+    signal_type: str
+      Which signal triggered (e.g., "gradient_starvation", "entropy_drift")
+
+    message: str
+      Human-readable description
+
+    metrics: dict[str, float]
+      Relevant metrics (e.g., {"gradient_norm": 0.001, "risk_score": 0.85})
+
+DEPENDENCIES
+  → moewatch.config (WatchConfig, OutputMode, AlertLevel)
+  → moewatch.hooks.manager (HookManager)
+  → moewatch.collector.stat_collector (StatCollector)
+  → moewatch.analyzer.entropy (EntropyAnalyzer)
+  → moewatch.analyzer.collapse (CollapseDetector)
+  → moewatch.analyzer.gradient_starvation (GradientStarvationAnalyzer) [v0.2.0]
+  → moewatch.analyzer.cross_layer (CrossLayerCorrelation) [v0.2.0]
+  → moewatch.analyzer.risk_score (RiskScoreFuser) [v0.2.0]
+  → moewatch.intervention.engine (InterventionEngine) [v0.2.0]
+  → moewatch.policy.base (PolicyBase) [v0.2.0]
+  → moewatch.policy.rule_policy (RulePolicy) [v0.2.0]
+  → moewatch.report.cli_reporter (CLIReporter)
+  → torch
+  → transformers (HuggingFace)
+
+IMPLEMENTATION NOTES
+  - MoEWatch must be thread-safe for alerts
+  - Use threading.Lock for alert_list mutations
+  - Guarantee zero weight modifications (hooks are read-only)
+  - Support both sync and async training loops
+
+────────────────────────────────────────────────────────────────────────────────
+
+FILE: moewatch/_audit.py
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE
+  Offline post-training diagnostic function. Accepts a trained model and
+  validation dataloader, runs N forward passes, collects routing statistics,
+  runs the full analyzer suite, and returns a comprehensive AuditReport.
+  No hooks left attached after the function returns.
+
+FUNCTION: audit
+────────────────────────────────────────────────────────────────────────────────
+
+  SIGNATURE
+    def audit(
+        model: torch.nn.Module,
+        dataloader: torch.utils.data.DataLoader,
+        num_batches: int = 100,
+        config: WatchConfig | None = None,
+        device: str = "cpu"
+    ) → AuditReport
+
+  DOCSTRING
+    """
+    Run offline diagnostic audit on a trained MoE model.
+
+    Collects routing statistics over num_batches forward passes,
+    runs entropy analysis, collapse detection, gradient estimation,
+    and cross-layer analysis. Returns comprehensive report.
+
+    Args:
+        model: MoE model to audit
+        dataloader: validation dataloader
+        num_batches: how many batches to process (default 100)
+        config: WatchConfig (uses defaults if None)
+        device: "cpu" or "cuda"
+
+    Returns:
+        AuditReport with all analysis results
+
+    Raises:
+        ValueError if model has no detectable routers
+        RuntimeError if device unavailable
+    """
+
+  PARAMETERS
+    model: torch.nn.Module
+      Input MoE model to audit
+
+    dataloader: torch.utils.data.DataLoader
+      Validation set dataloader
+
+    num_batches: int = 100
+      Number of batches to process (CPU-efficient limit)
+
+    config: WatchConfig | None = None
+      Configuration (uses WatchConfig defaults if None)
+
+    device: str = "cpu"
+      Torch device string
+
+  RETURNS
+    AuditReport — structured result containing:
+      - per-layer entropy analysis
+      - expert health state machine results
+      - gradient starvation assessment
+      - cross-layer propagation analysis
+      - risk scores for each layer
+      - summary statistics
+
+  SIDE EFFECTS
+    - Temporarily attaches hooks to model
+    - Runs forward passes (no backprop)
+    - Detaches all hooks at end (guaranteed via finally block)
+    - Model weights unchanged
+
+  IMPLEMENTATION NOTES
+    - Use HookManager for temporary hook attachment/detachment
+    - Use StatCollector to aggregate stats
+    - Disable gradients: with torch.no_grad(): ...
+    - Move data to device during loop
+    - Wrap all analysis in try/finally to guarantee cleanup
+
+DEPENDENCIES
+  → moewatch.config (WatchConfig)
+  → moewatch.hooks.manager (HookManager)
+  → moewatch.collector.stat_collector (StatCollector)
+  → moewatch.analyzer (all analyzers)
+  → moewatch.report.audit_report (AuditReport)
+  → torch
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 2: HOOKS SUBMODULE (moewatch/hooks/)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+FILE: moewatch/hooks/__init__.py
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE
+  Re-export all hook-related classes for convenient importing.
+
+EXPORTS
+  - HookManager           (class)
+  - RouterForwardHook    (class)
+  - GradientStarvationHook (class) [v0.2.0]
+  - detect_router_modules (function)
+
+DEPENDENCIES
+  → moewatch.hooks.manager
+  → moewatch.hooks.router_hook
+  → moewatch.hooks.gradient_hook
+  → moewatch.hooks.detection
+
+────────────────────────────────────────────────────────────────────────────────
+
+FILE: moewatch/hooks/manager.py
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE
+  HookManager owns all hook handles. Manages lifecycle: attach() registers
+  hooks, detach() cleanly removes them. Guaranteed no hook leaks even on
+  exception (uses finally blocks).
+
+CLASS: HookManager
+────────────────────────────────────────────────────────────────────────────────
+
+  ATTRIBUTES
+    model: torch.nn.Module
+      Reference to monitored model
+
+    stat_collector: StatCollector
+      Destination for hook event writes
+
+    config: WatchConfig
+      Configuration reference
+
+    _handles: list[torch.utils.hooks.RemovableHandle]
+      List of all registered hook handles (for cleanup)
+
+    _attached: bool
+      Flag indicating attachment state
+
+  METHODS
+
+    __init__(model: torch.nn.Module, stat_collector: StatCollector, config: WatchConfig)
+      Args:
+        model (torch.nn.Module) — MoE model
+        stat_collector (StatCollector) — event destination
+        config (WatchConfig) — configuration
+      Returns: None
+
+    attach() → None
+      Args: None
+      Returns: None
+      Docstring: "Attach all hooks to detected router modules."
+      Side effects:
+        - Auto-detects MoE routers via detect_router_modules()
+        - Registers RouterForwardHook on each router
+        - Registers GradientStarvationHook on expert weights (if enabled)
+        - Stores all handles in self._handles
+      Raises: ValueError if no routers detected
+
+    detach() → None
+      Args: None
+      Returns: None
+      Docstring: "Remove all registered hooks. Safe even if called multiple times."
+      Side effects:
+        - Iterates through self._handles and calls .remove()
+        - Clears self._handles list
+        - Sets self._attached = False
+      Note: Uses try/finally to guarantee cleanup
+
+    is_attached() → bool
+      Args: None
+      Returns: bool — True if hooks currently attached
+      Docstring: "Check current attachment state."
+
+DEPENDENCIES
+  → moewatch.hooks.router_hook (RouterForwardHook)
+  → moewatch.hooks.gradient_hook (GradientStarvationHook) [v0.2.0]
+  → moewatch.hooks.detection (detect_router_modules)
+  → moewatch.collector.stat_collector (StatCollector)
+  → moewatch.config (WatchConfig)
+  → torch
+
+IMPLEMENTATION NOTES
+  - Store handles so we can remove them later
+  - Use try/finally in attach() to guarantee detach() on exception
+  - Make detach() idempotent (safe to call multiple times)
+
+────────────────────────────────────────────────────────────────────────────────
+
+FILE: moewatch/hooks/router_hook.py
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE
+  Forward hook on router modules. Captures routing output tensor and constructs
+  RoutingEvent with metadata. Writes to StatCollector. Designed for hot path:
+  minimal allocation, no loops over tokens.
+
+DATACLASS: RoutingEvent
+────────────────────────────────────────────────────────────────────────────────
+  Fields:
+    timestamp: float
+      Unix timestamp of event
+
+    global_step: int
+      Training step number
+
+    layer_name: str
+      Router module name (e.g., "layers.5.moe")
+
+    routing_logits: torch.Tensor
+      Raw router logits (shape: [batch_size, n_experts] or similar)
+
+    selected_experts: torch.Tensor
+      Top-k selected expert indices (shape: [batch_size, k])
+
+    expert_count: int
+      Number of experts in this router
+
+    batch_size: int
+      Current batch size
+
+CLASS: RouterForwardHook
+────────────────────────────────────────────────────────────────────────────────
+
+  DOCSTRING
+    """
+    Forward hook on MoE router module. Captures routing decisions and
+    metadata at each forward pass. Zero-copy when possible.
+    """
+
+  METHODS
+
+    __init__(layer_name: str, stat_collector: StatCollector, config: WatchConfig)
+      Args:
+        layer_name (str) — name of router module (e.g., "layers.5.moe")
+        stat_collector (StatCollector) — writes events here
+        config (WatchConfig) — configuration reference
+      Returns: None
+
+    __call__(module: torch.nn.Module, input: tuple, output: torch.Tensor) → None
+      Args:
+        module (torch.nn.Module) — router module being hooked
+        input (tuple) — module input
+        output (torch.Tensor) — router output (logits or indices)
+      Returns: None
+      Docstring: "Hook callback. Captures routing output and writes RoutingEvent."
+      Side effects:
+        - Infers expert count from output shape
+        - Constructs RoutingEvent
+        - Calls stat_collector.write_routing_event()
+      Note: Designed for <1ms execution per forward pass
+
+DEPENDENCIES
+  → moewatch.collector.stat_collector (StatCollector)
+  → moewatch.config (WatchConfig)
+  → torch
+  → time (for timestamp)
+
+IMPLEMENTATION NOTES
+  - Use torch.no_grad() to prevent gradient computation in hook
+  - Infer expert count from output shape heuristic (last dim = n_experts)
+  - Avoid tensor copies; store references where possible
+  - Do not modify module weights or inputs
+
+────────────────────────────────────────────────────────────────────────────────
+
+FILE: moewatch/hooks/gradient_hook.py  [v0.2.0]
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE
+  Backward hook on expert weight tensors. Captures per-expert gradient L2 norm
+  each backward pass. Core data source for Tier 1 (gradient starvation) signal.
+  Sampling rate configurable to minimize overhead.
+
+DATACLASS: GradientEvent
+────────────────────────────────────────────────────────────────────────────────
+  Fields:
+    timestamp: float
+      Unix timestamp
+
+    global_step: int
+      Training step
+
+    layer_name: str
+      Name of expert weight tensor
+
+    expert_id: int
+      Which expert within the layer (0 to n_experts-1)
+
+    gradient_norm: float
+      L2 norm of gradient: sqrt(sum(grad^2))
+
+    gradient_magnitude: float
+      Alias for gradient_norm (same value)
+
+CLASS: GradientStarvationHook
+────────────────────────────────────────────────────────────────────────────────
+
+  DOCSTRING
+    """
+    Backward hook on expert weight tensors. Captures per-expert gradient L2 norm.
+    Samples every N steps to minimize overhead. Primary data source for Tier 1
+    gradient starvation signal.
+    """
+
+  ATTRIBUTES
+    layer_name: str
+      Name of expert layer (e.g., "layers.5.experts")
+
+    expert_id: int
+      Which expert (0-indexed)
+
+    stat_collector: StatCollector
+      Destination for gradient events
+
+    config: WatchConfig
+      Configuration (sample_every parameter)
+
+    _step_counter: int
+      Internal counter to implement sampling
+
+  METHODS
+
+    __init__(
+        layer_name: str,
+        expert_id: int,
+        stat_collector: StatCollector,
+        config: WatchConfig
+    )
+      Args:
+        layer_name (str) — expert layer name
+        expert_id (int) — expert index
+        stat_collector (StatCollector) — event destination
+        config (WatchConfig) — configuration
+      Returns: None
+
+    __call__(grad: torch.Tensor) → None
+      Args:
+        grad (torch.Tensor) — gradient tensor (2D: [in_features, out_features])
+      Returns: None
+      Docstring: "Hook callback. Computes gradient norm and writes GradientEvent."
+      Side effects:
+        - Computes gradient_norm = torch.norm(grad, p=2)
+        - Samples every config.sample_every steps
+        - Writes GradientEvent to stat_collector
+      Note: Executes in <0.5ms per expert
+
+DEPENDENCIES
+  → moewatch.collector.stat_collector (StatCollector)
+  → moewatch.config (WatchConfig)
+  → torch
+  → time
+
+IMPLEMENTATION NOTES
+  - Use register_full_backward_hook (not register_backward_hook) to capture grads
+  - Compute L2 norm: torch.norm(grad, p=2) or torch.sqrt(torch.sum(grad**2))
+  - Sample every N steps: only write event if step % config.sample_every == 0
+  - Return None (backward hooks don't return modified grads)
+
+────────────────────────────────────────────────────────────────────────────────
+
+FILE: moewatch/hooks/detection.py
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE
+  Auto-detect MoE router layers by name pattern and output shape heuristics.
+  Supports Mixtral, Qwen3-MoE, DeepSeek-MoE, OLMoE. Custom architectures
+  can override via WatchConfig.router_modules.
+
+FUNCTION: detect_router_modules
+────────────────────────────────────────────────────────────────────────────────
+
+  SIGNATURE
+    def detect_router_modules(
+        model: torch.nn.Module,
+        config: WatchConfig
+    ) → dict[str, torch.nn.Module]
+
+  DOCSTRING
+    """
+    Auto-detect MoE router modules in model.
+
+    First checks WatchConfig.router_modules override. If set, returns those.
+    Otherwise scans model.named_modules() for routers by name pattern:
+      - "gate", "router", "sparse_moe", "block_sparse_moe" (case-insensitive)
+
+    Validates detected modules have correct output shape (2D, last dim = experts).
+
+    Args:
+        model (torch.nn.Module) — MoE model to scan
+        config (WatchConfig) — configuration with optional override
+
+    Returns:
+        dict[str, torch.nn.Module] — {module_name: module_instance}
+
+    Raises:
+        ValueError if no routers detected and no override provided
+    """
+
+  PARAMETERS
+    model: torch.nn.Module
+      MoE model to scan
+
+    config: WatchConfig
+      Contains optional router_modules override list
+
+  RETURNS
+    dict[str, torch.nn.Module]
+      Keys: router module names (e.g., "layers.5.moe_router")
+      Values: actual module instances
+
+  ALGORITHM
+    1. If config.router_modules set: return {name: model.get_module(name) for name in list}
+    2. Otherwise iterate model.named_modules():
+       - Match name against patterns (gate, router, etc.) case-insensitive
+       - Check output shape is 2D with float dtype
+       - Infer n_experts from shape
+       - Add to candidates dict
+    3. Return dict or raise ValueError if empty
+
+  IMPLEMENTATION NOTES
+    - Use model.named_modules() to iterate all submodules
+    - Use module.get_submodule(name) to retrieve by name string
+    - Pattern matching: name.lower().find("gate") >= 0 or similar
+    - Shape validation: assert output.ndim == 2 and output.shape[-1] == n_experts
+
+DEPENDENCIES
+  → moewatch.config (WatchConfig)
+  → torch
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 3: COLLECTOR SUBMODULE (moewatch/collector/)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+FILE: moewatch/collector/__init__.py
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE
+  Re-export all collector-related classes.
+
+EXPORTS
+  - StatCollector        (class)
+  - LayerStats           (dataclass)
+  - GradientStats        (dataclass) [v0.2.0]
+  - RingBuffer           (class)
+
+DEPENDENCIES
+  → moewatch.collector.stat_collector
+  → moewatch.collector.ring_buffer
+  → moewatch.collector.baseline_tracker (optional import)
+
+────────────────────────────────────────────────────────────────────────────────
+
+FILE: moewatch/collector/ring_buffer.py
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE
+  Fixed-memory circular buffer for event streams. Configurable capacity
+  (default 1000 events per layer). Thread-safe write path. Supports
+  windowed reads for CUSUM and baseline computation.
+
+CLASS: RingBuffer
+────────────────────────────────────────────────────────────────────────────────
+
+  GENERIC: RingBuffer[T] where T is RoutingEvent or GradientEvent
+
+  ATTRIBUTES
+    capacity: int
+      Maximum number of events to store (circular, drops oldest)
+
+    _buffer: collections.deque[T]
+      Underlying circular buffer
+
+    _lock: threading.Lock
+      Read-write synchronization
+
+  METHODS
+
+    __init__(capacity: int = 1000)
+      Args:
+        capacity (int) — maximum events to store
+      Returns: None
+
+    write(event: T) → None
+      Args:
+        event (T) — RoutingEvent or GradientEvent
+      Returns: None
+      Docstring: "Append event to buffer. Drops oldest if full."
+      Side effects:
+        - If len >= capacity: popleft() oldest
+        - Append new event
+        - Thread-safe
+
+    read_window(window_size: int) → list[T]
+      Args:
+        window_size (int) — number of recent events to return
+      Returns:
+        list[T] — most recent window_size events (or fewer if not enough)
+      Docstring: "Get most recent N events."
+      Thread-safe read
+
+    read_all() → list[T]
+      Args: None
+      Returns: list[T] — all events currently in buffer
+      Docstring: "Get all events in buffer."
+
+    length() → int
+      Args: None
+      Returns: int — current number of events
+      Docstring: "Get buffer size."
+
+    clear() → None
+      Args: None
+      Returns: None
+      Docstring: "Empty the buffer."
+      Thread-safe
+
+  IMPLEMENTATION NOTES
+    - Use collections.deque with maxlen=None (manual management of size)
+    - Use threading.Lock for read-write synchronization
+    - Copy event lists when returning (prevent external mutation)
+
+DEPENDENCIES
+  → torch (for event types)
+  → threading
+  → collections
+
+────────────────────────────────────────────────────────────────────────────────
+
+FILE: moewatch/collector/stat_collector.py
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE
+  Central event aggregator. Maintains RingBuffer per layer for routing and
+  gradient events. Computes LayerStats (expert token counts, utilization,
+  load imbalance, entropy window) from routing events and GradientStats
+  from gradient events. Thread-safe read path via get_all_stats().
+
+DATACLASS: LayerStats
+────────────────────────────────────────────────────────────────────────────────
+  Fields:
+    layer_name: str
+      Router module name
+
+    expert_token_counts: torch.Tensor
+      Token count per expert (shape: [n_experts])
+
+    expert_utilization: torch.Tensor
+      Fraction of tokens per expert (shape: [n_experts])
+
+    load_imbalance_ratio: float
+      max(utilization) / mean(utilization)
+
+    raw_logits_window: torch.Tensor
+      Recent routing logits (shape: [window_size, batch_size, n_experts])
+
+    step: int
+      Training step of this snapshot
+
+DATACLASS: GradientStats  [v0.2.0]
+────────────────────────────────────────────────────────────────────────────────
+  Fields:
+    layer_name: str
+      Expert layer name
+
+    expert_id: int
+      Expert index
+
+    gradient_norm_history: list[float]
+      Recent gradient L2 norms (one per event)
+
+    gradient_norm_mean: float
+      Rolling mean of gradient norms
+
+    gradient_norm_rolling_std: float
+      Rolling standard deviation
+
+    step: int
+      Current training step
+
+CLASS: StatCollector
+────────────────────────────────────────────────────────────────────────────────
+
+  ATTRIBUTES
+    config: WatchConfig
+      Configuration reference
+
+    _routing_buffers: dict[str, RingBuffer[RoutingEvent]]
+      One buffer per detected router layer
+
+    _gradient_buffers: dict[str, dict[int, RingBuffer[GradientEvent]]]
+      Nested: layer_name → expert_id → buffer
+
+    _lock: threading.Lock
+      Read-write synchronization
+
+    _last_step: int
+      Last step number processed
+
+  METHODS
+
+    __init__(config: WatchConfig)
+      Args:
+        config (WatchConfig) — configuration
+      Returns: None
+
+    register_layer(layer_name: str, n_experts: int) → None
+      Args:
+        layer_name (str) — router module name
+        n_experts (int) — number of experts
+      Returns: None
+      Docstring: "Create buffers for new layer."
+      Side effects:
+        - Creates RingBuffer in _routing_buffers[layer_name]
+        - Creates nested dicts in _gradient_buffers for each expert
+
+    write_routing_event(event: RoutingEvent) → None
+      Args:
+        event (RoutingEvent) — routing observation
+      Returns: None
+      Docstring: "Append routing event."
+      Side effects: Writes to _routing_buffers[event.layer_name]
+
+    write_gradient_event(event: GradientEvent) → None  [v0.2.0]
+      Args:
+        event (GradientEvent) — gradient observation
+      Returns: None
+      Docstring: "Append gradient event."
+      Side effects: Writes to _gradient_buffers[event.layer_name][event.expert_id]
+
+    get_all_stats() → dict[str, dict[str, LayerStats | GradientStats]]
+      Args: None
+      Returns:
+        dict with keys:
+          "routing": {layer_name: LayerStats, ...}
+          "gradient": {layer_name: {expert_id: GradientStats, ...}, ...}
+      Docstring: "Get snapshot of all layer and gradient statistics."
+      Thread-safe read
+
+    get_layer_stats(layer_name: str) → LayerStats
+      Args:
+        layer_name (str) — router module name
+      Returns: LayerStats — stats for this layer
+      Raises: KeyError if layer not registered
+
+DEPENDENCIES
+  → moewatch.collector.ring_buffer (RingBuffer)
+  → moewatch.hooks.router_hook (RoutingEvent)
+  → moewatch.hooks.gradient_hook (GradientEvent) [v0.2.0]
+  → moewatch.config (WatchConfig)
+  → torch
+  → threading
+
+IMPLEMENTATION NOTES
+  - Use defaultdict or explicit dicts to manage buffers
+  - Thread-safe: use Lock for all writes and reads
+  - Snapshot get_all_stats() returns copy (not reference)
+  - Compute LayerStats on-demand from recent events
+
+────────────────────────────────────────────────────────────────────────────────
+
+FILE: moewatch/collector/baseline_tracker.py  [v0.2.0]
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE
+  Maintains intervention-conditioned counterfactual baseline per layer.
+  Tracks which steps are "intervention-influenced" and excludes them from
+  baseline regression window. Computes projected no-action trajectory via
+  rolling linear regression on clean history. Critical for correct causal
+  attribution of intervention effects.
+
+CLASS: BaselineTracker
+────────────────────────────────────────────────────────────────────────────────
+
+  DOCSTRING
+    """
+    Computes counterfactual baseline trajectories for intervention attribution.
+
+    For each layer, maintains rolling linear regression on signal history
+    that excludes post-intervention steps. Prevents "baseline illusion"
+    where past interventions contaminate future baselines.
+
+    Exports compute_counterfactual_delta(layer, actual_value) → float
+    which returns actual_value - baseline_value.
+    """
+
+  ATTRIBUTES
+    config: WatchConfig
+      Configuration (min_clean_steps, exclusion_window)
+
+    _baselines: dict[str, RollingLinearRegression]
+      One baseline estimator per layer
+
+    _clean_history: dict[str, list[float]]
+      Signal history excluding intervention-influenced steps
+
+    _intervention_windows: dict[str, list[tuple[int, int]]]
+      Marked time windows (start_step, end_step) to exclude per layer
+
+    _current_step: int
+      Current training step
+
+  METHODS
+
+    __init__(config: WatchConfig)
+      Args:
+        config (WatchConfig) — configuration with min_clean_steps, exclusion_window
+      Returns: None
+
+    register_layer(layer_name: str) → None
+      Args:
+        layer_name (str) — router module name
+      Returns: None
+      Docstring: "Initialize baseline tracking for layer."
+
+    mark_intervention(layer_name: str, start_step: int) → None
+      Args:
+        layer_name (str) — affected layer
+        start_step (int) — step when intervention applied
+      Returns: None
+      Docstring:
+        "Mark steps as intervention-influenced. Excludes from baseline for
+        config.baseline_exclusion_window steps."
+      Side effects:
+        - Records (start_step, start_step + exclusion_window) in intervention_windows
+        - Triggers baseline reset after exclusion_window expires
+
+    update_signal(layer_name: str, value: float, step: int) → None
+      Args:
+        layer_name (str) — router module name
+        value (float) — signal value (e.g., entropy, gradient norm)
+        step (int) — training step
+      Returns: None
+      Docstring: "Update signal history. Excludes intervention-influenced steps."
+      Side effects:
+        - If step not in any intervention window: append to clean_history
+        - Refit rolling regression if sufficient clean history
+
+    compute_counterfactual_delta(layer_name: str, actual_value: float) → float
+      Args:
+        layer_name (str) — router module name
+        actual_value (float) — observed signal value
+      Returns: float — actual_value - baseline_projected_value
+      Docstring:
+        "Compute counterfactual delta. Positive = improvement vs baseline."
+      Raises: ValueError if insufficient clean history
+
+    is_baseline_valid(layer_name: str) → bool
+      Args:
+        layer_name (str) — router module name
+      Returns: bool — True if enough clean history to project baseline
+      Docstring: "Check if baseline has sufficient history."
+
+DEPENDENCIES
+  → moewatch.config (WatchConfig)
+  → numpy (for linear regression)
+  → sklearn.linear_model.LinearRegression (optional, or implement rolling OLS)
+
+IMPLEMENTATION NOTES
+  - Use rolling linear regression: fit y = a*step + b on clean_history steps
+  - When projecting: y_baseline(t) = a*(t) + b
+  - Clean history: only steps where step not in any (intervention_start, end)
+  - Minimum clean_steps required before baseline valid (config.baseline_min_clean_steps)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 4: ANALYZER SUBMODULE (moewatch/analyzer/)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+FILE: moewatch/analyzer/__init__.py
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE
+  Re-export all analyzer classes.
+
+EXPORTS
+  - EntropyAnalyzer             (class)
+  - CollapseDetector            (class)
+  - GradientStarvationAnalyzer  (class) [v0.2.0]
+  - CrossLayerCorrelation       (class) [v0.2.0]
+  - RiskScoreFuser              (class) [v0.2.0]
+
+DEPENDENCIES
+  → moewatch.analyzer.entropy
+  → moewatch.analyzer.collapse
+  → moewatch.analyzer.gradient_starvation
+  → moewatch.analyzer.cross_layer
+  → moewatch.analyzer.risk_score
+
+────────────────────────────────────────────────────────────────────────────────
+
+FILE: moewatch/analyzer/cusum.py  [v0.2.0]
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE
+  Cumulative Sum (CUSUM) change-point detection. Used by entropy and gradient
+  analyzers to detect drift in signal sequences. Replaces naive recent-vs-prior
+  thresholding with statistically principled approach.
+
+FUNCTION: detect_change
+────────────────────────────────────────────────────────────────────────────────
+
+  SIGNATURE
+    def detect_change(
+        series: list[float] | numpy.ndarray,
+        threshold: float = 5.0,
+        drift: float = 1.0
+    ) → tuple[bool, int, float]
+
+  DOCSTRING
+    """
+    Detect change-point in time series using CUSUM algorithm.
+
+    Args:
+        series: sequence of values
+        threshold: alert threshold for cumulative sum
+        drift: minimum change magnitude to detect (default 1.0)
+
+    Returns:
+        (change_detected: bool, change_point_step: int, cusum_value: float)
+
+    Algorithm:
+        1. Compute CUSUM = cumulative sum of (x - drift)
+        2. Track max CUSUM
+        3. If CUSUM exceeds threshold: change detected
+        4. Reset on detection
+    """
+
+  PARAMETERS
+    series: list[float] | numpy.ndarray
+      Time series values
+
+    threshold: float = 5.0
+      CUSUM threshold for alert
+
+    drift: float = 1.0
+      Expected drift magnitude (window size parameter)
+
+  RETURNS
+    tuple[bool, int, float]
+      - change_detected: True if CUSUM crossed threshold
+      - change_point_step: step where change started (or -1 if not detected)
+      - cusum_value: current cumulative sum value
+
+  ALGORITHM
+    cusum_pos = 0
+    for i, val in enumerate(series):
+        cusum_pos = max(0, cusum_pos + (val - drift))
+        if cusum_pos > threshold:
+            return (True, i, cusum_pos)
+    return (False, -1, cusum_pos)
+
+CLASS: CUSUMDetector
+────────────────────────────────────────────────────────────────────────────────
+
+  ATTRIBUTES
+    threshold: float
+      Alert threshold
+
+    drift: float
+      Expected drift magnitude
+
+    _cusum_pos: float
+      Current positive cumulative sum
+
+    _min_cusum: float
+      Minimum cusum value (for negative detection)
+
+  METHODS
+
+    __init__(threshold: float = 5.0, drift: float = 1.0)
+      Args:
+        threshold (float) — alert threshold
+        drift (float) — drift parameter
+      Returns: None
+
+    update(value: float) → bool
+      Args:
+        value (float) — new series value
+      Returns: bool — True if change detected
+      Docstring: "Process one value, return True if threshold crossed."
+
+    reset() → None
+      Args: None
+      Returns: None
+      Docstring: "Reset internal state."
+
+DEPENDENCIES
+  → numpy (for array operations)
+
+IMPLEMENTATION NOTES
+  - CUSUM formula: S+ = max(0, S+ + (x - drift))
+  - When S+ > threshold: change detected, reset to 0
+  - Drift parameter tunes sensitivity (lower drift = more sensitive)
+  - Common choices: drift=1.0 for normalized signals, drift=0.5 for sensitive detection
+
+────────────────────────────────────────────────────────────────────────────────
+
+FILE: moewatch/analyzer/entropy.py
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE
+  Tier 2 signal. Per-layer Shannon entropy detection. CUSUM-based drift
+  detection. Normalized entropy against H_max = log2(n_experts).
+  Trend classification: DECLINING / STABLE / IMPROVING / UNKNOWN.
+
+FUNCTION: compute_entropy
+────────────────────────────────────────────────────────────────────────────────
+
+  SIGNATURE
+    def compute_entropy(probs: torch.Tensor | numpy.ndarray) → float
+
+  DOCSTRING
+    """
+    Compute Shannon entropy of probability distribution.
+
+    H = -sum(p * log(p))  [nats]
+    Handles p=0 correctly (0 * log(0) = 0).
+
+    Args:
+        probs: probability distribution (sums to ~1.0)
+
+    Returns:
+        float: entropy in nats
+    """
+
+  PARAMETERS
+    probs: torch.Tensor | numpy.ndarray
+      Distribution (1D or 2D)
+
+  RETURNS
+    float — entropy value (nats)
+
+DATACLASS: LayerEntropyReport
+────────────────────────────────────────────────────────────────────────────────
+  Fields:
+    layer_name: str
+
+    current_entropy: float
+      Recent entropy value
+
+    normalized_entropy: float
+      entropy / H_max where H_max = log2(n_experts)
+
+    trend: str
+      "DECLINING" / "STABLE" / "IMPROVING" / "UNKNOWN"
+
+    drift_detected: bool
+      CUSUM detector output
+
+    step: int
+      Current training step
+
+CLASS: EntropyAnalyzer
+────────────────────────────────────────────────────────────────────────────────
+
+  DOCSTRING
+    """
+    Tier 2 signal: routing entropy drift detection.
+
+    Monitors per-layer Shannon entropy of expert routing distribution.
+    Uses CUSUM to detect entropy collapse (narrowing distribution).
+    Normalized against H_max = log2(n_experts).
+    """
+
+  ATTRIBUTES
+    config: WatchConfig
+      Configuration thresholds
+
+    _entropy_history: dict[str, list[float]]
+      Per-layer entropy time series
+
+    _cusum_detectors: dict[str, CUSUMDetector]
+      One detector per layer
+
+    _entropy_trends: dict[str, str]
+      Trend classification per layer
+
+  METHODS
+
+    __init__(config: WatchConfig)
+      Args:
+        config (WatchConfig) — configuration
+      Returns: None
+
+    analyze(stat_collector: StatCollector) → dict[str, LayerEntropyReport]
+      Args:
+        stat_collector (StatCollector) — event source
+      Returns:
+        dict[str, LayerEntropyReport] — one report per layer
+      Docstring: "Analyze all layers and return entropy reports."
+      Algorithm:
+        1. For each layer in stat_collector:
+           - Get recent routing logits
+           - Compute softmax(logits) → probs
+           - Compute entropy
+           - Update CUSUM detector
+           - Classify trend
+           - Return report
+
+DEPENDENCIES
+  → moewatch.collector.stat_collector (StatCollector)
+  → moewatch.analyzer.cusum (CUSUMDetector) [v0.2.0]
+  → moewatch.config (WatchConfig)
+  → torch
+  → numpy
+
+IMPLEMENTATION NOTES
+  - Compute entropy from logits: probs = softmax(logits), then entropy(probs)
+  - Normalize: norm_ent = H / log2(n_experts)
+  - Trend: compare recent window vs longer window (declining = narrowing)
+
+────────────────────────────────────────────────────────────────────────────────
+
+FILE: moewatch/analyzer/collapse.py
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE
+  Expert health state machine. States: HEALTHY, COLD, DEAD, UNKNOWN.
+  Cold-to-dead promotion via cold_steps_limit counter. Load imbalance
+  score (max/mean ratio). Per-expert utilization and token count tracking.
+
+ENUM: ExpertStatus
+────────────────────────────────────────────────────────────────────────────────
+  Values:
+    HEALTHY    = 0
+    COLD       = 1   (low utilization, not yet dead)
+    DEAD       = 2   (no tokens)
+    UNKNOWN    = 3   (not enough data)
+
+DATACLASS: ExpertState
+────────────────────────────────────────────────────────────────────────────────
+  Fields:
+    expert_id: int
+
+    status: ExpertStatus
+
+    consecutive_cold_steps: int
+      How many steps in COLD state
+
+    token_count: int
+      Total tokens routed to this expert
+
+    utilization: float
+      Fraction of total tokens
+
+DATACLASS: LayerCollapseReport
+────────────────────────────────────────────────────────────────────────────────
+  Fields:
+    layer_name: str
+
+    expert_states: dict[int, ExpertState]
+      One state per expert
+
+    num_dead_experts: int
+
+    num_cold_experts: int
+
+    load_imbalance_ratio: float
+      max(utilization) / mean(utilization)
+
+    severity: str
+      "HEALTHY" / "DEGRADED" / "CRITICAL" / "UNKNOWN"
+
+    step: int
+
+CLASS: CollapseDetector
+────────────────────────────────────────────────────────────────────────────────
+
+  DOCSTRING
+    """
+    Expert health state machine. Tracks expert status (HEALTHY/COLD/DEAD).
+    Updates based on token counts from routing events. Cold experts promoted
+    to DEAD after cold_steps_limit consecutive steps.
+    """
+
+  ATTRIBUTES
+    config: WatchConfig
+      Thresholds (dead_threshold, cold_threshold, cold_steps_limit)
+
+    _expert_states: dict[str, dict[int, ExpertState]]
+      Nested: layer_name → expert_id → state
+
+    _cold_counters: dict[str, dict[int, int]]
+      Tracks consecutive cold steps per expert
+
+  METHODS
+
+    __init__(config: WatchConfig)
+      Args:
+        config (WatchConfig) — configuration
+      Returns: None
+
+    analyze(stat_collector: StatCollector) → dict[str, LayerCollapseReport]
+      Args:
+        stat_collector (StatCollector) — event source
+      Returns:
+        dict[str, LayerCollapseReport] — one report per layer
+      Docstring: "Analyze expert health and return collapse reports."
+      Algorithm:
+        1. For each layer, get LayerStats (expert token counts)
+        2. Compute utilization per expert
+        3. Update health status based on config thresholds
+        4. Promote COLD→DEAD if cold_steps_limit exceeded
+        5. Return report with severity classification
+
+DEPENDENCIES
+  → moewatch.collector.stat_collector (StatCollector)
+  → moewatch.config (WatchConfig)
+
+IMPLEMENTATION NOTES
+  - Use state machine: UNKNOWN → HEALTHY/COLD → DEAD (one-way progression)
+  - Cold counter resets if expert becomes HEALTHY again
+  - Load imbalance: ratio = max_util / mean_util (1.0 = perfect balance)
+
+────────────────────────────────────────────────────────────────────────────────
+
+FILE: moewatch/analyzer/gradient_starvation.py  [v0.2.0]
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE
+  Tier 1 signal (earliest). Detects expert gradient starvation. Computes
+  per-expert gradient norm rolling mean. Detects starvation: expert
+  gradient norm < threshold for N consecutive steps. Outputs
+  GradientStarvationReport with per-expert starvation_score and
+  starvation_onset_step estimate.
+
+DATACLASS: GradientStarvationReport
+────────────────────────────────────────────────────────────────────────────────
+  Fields:
+    layer_name: str
+
+    expert_id: int
+
+    gradient_norm_mean: float
+      Rolling mean of gradient L2 norm
+
+    gradient_norm_std: float
+      Rolling standard deviation
+
+    starvation_score: float
+      0.0 (healthy) → 1.0 (starving) based on norm vs threshold
+
+    starvation_detected: bool
+      True if consecutive steps below threshold
+
+    starvation_onset_step: int | None
+      Training step where starvation began (if detected)
+
+    step: int
+
+CLASS: GradientStarvationAnalyzer
+────────────────────────────────────────────────────────────────────────────────
+
+  DOCSTRING
+    """
+    Tier 1 primary signal: gradient starvation detection.
+
+    Consumes per-expert gradient norms from backward hooks.
+    Computes rolling statistics and detects when expert gradients fall
+    below threshold for N consecutive steps. This is the earliest and
+    most actionable signal for routing collapse.
+    """
+
+  ATTRIBUTES
+    config: WatchConfig
+      Thresholds (dead_threshold, cold_threshold, sample_every)
+
+    _gradient_histories: dict[str, dict[int, list[float]]]
+      Nested: layer_name → expert_id → gradient norm history
+
+    _starvation_counters: dict[str, dict[int, int]]
+      Tracks consecutive steps below threshold per expert
+
+    _onset_steps: dict[str, dict[int, int]]
+      Records step when starvation began per expert
+
+  METHODS
+
+    __init__(config: WatchConfig)
+      Args:
+        config (WatchConfig) — configuration
+      Returns: None
+
+    analyze(stat_collector: StatCollector) → dict[str, list[GradientStarvationReport]]
+      Args:
+        stat_collector (StatCollector) — event source with GradientStats
+      Returns:
+        dict[str, list[GradientStarvationReport]]
+        Format: {layer_name: [report_for_expert_0, report_for_expert_1, ...]}
+      Docstring: "Analyze gradient norms and return starvation reports."
+      Algorithm:
+        1. For each layer, get GradientStats from collector
+        2. For each expert, get gradient_norm_history
+        3. Compute rolling mean and std
+        4. Compute starvation_score = max(0, 1 - norm/threshold)
+        5. Track consecutive steps below threshold
+        6. If >= config.cold_steps_limit: set starvation_detected=True
+        7. Return report
+
+DEPENDENCIES
+  → moewatch.collector.stat_collector (StatCollector)
+  → moewatch.config (WatchConfig)
+  → numpy
+
+IMPLEMENTATION NOTES
+  - Gradient norm threshold: use config.cold_threshold (e.g., 0.05)
+  - Rolling mean/std: use numpy.mean, numpy.std on history window
+  - Starvation score: continuous metric before binary detection
+  - Store onset_step once and reuse (don't update every step)
+
+────────────────────────────────────────────────────────────────────────────────
+
+FILE: moewatch/analyzer/cross_layer.py  [v0.2.0]
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE
+  Tier 3 localization signal. Maintains sliding window of per-layer entropy
+  sequences. Computes pairwise Pearson correlation matrix over the window.
+  Detects: source layer (highest entropy drop rate), downstream victims
+  (high correlation with source), propagation velocity. Exports
+  CrossLayerReport with propagation_graph and source_layer identification.
+
+DATACLASS: CrossLayerReport
+────────────────────────────────────────────────────────────────────────────────
+  Fields:
+    source_layer: str | None
+      Layer where collapse initiated (if detected)
+
+    victim_layers: list[str]
+      Downstream layers affected by source collapse
+
+    correlation_matrix: numpy.ndarray
+      Pairwise entropy correlations (shape: [n_layers, n_layers])
+
+    propagation_velocity: float | None
+      Steps per layer for propagation (if measurable)
+
+    step: int
+
+CLASS: CrossLayerCorrelation
+────────────────────────────────────────────────────────────────────────────────
+
+  DOCSTRING
+    """
+    Tier 3 signal: cross-layer correlation analysis.
+
+    Detects routing collapse spread from source layer to neighbors.
+    Identifies which layer initiated and which are victims.
+    Estimates propagation velocity for forecasting.
+    """
+
+  ATTRIBUTES
+    config: WatchConfig
+      Configuration reference
+
+    _entropy_sequences: dict[str, list[float]]
+      Per-layer entropy history (sliding window)
+
+    _window_size: int
+      Correlation window size (e.g., 100 steps)
+
+    _layer_order: list[str]
+      Order of layers in model (for propagation analysis)
+
+  METHODS
+
+    __init__(config: WatchConfig, layer_order: list[str])
+      Args:
+        config (WatchConfig) — configuration
+        layer_order (list[str]) — ordered list of layer names
+      Returns: None
+
+    analyze(entropy_analyzer: EntropyAnalyzer) → CrossLayerReport
+      Args:
+        entropy_analyzer (EntropyAnalyzer) — source of entropy values
+      Returns:
+        CrossLayerReport — correlation analysis and source/victim identification
+      Docstring: "Analyze cross-layer entropy correlation."
+      Algorithm:
+        1. Build entropy_sequences dict from entropy_analyzer reports
+        2. Keep sliding window of recent values per layer
+        3. Compute Pearson correlation matrix
+        4. Identify source: layer with steepest entropy drop rate
+        5. Identify victims: layers correlated with source
+        6. Estimate propagation velocity from correlation lags
+        7. Return report
+
+DEPENDENCIES
+  → moewatch.analyzer.entropy (EntropyAnalyzer)
+  → moewatch.config (WatchConfig)
+  → numpy (for correlation, polyfit)
+  → scipy.stats (optional, for correlation p-values)
+
+IMPLEMENTATION NOTES
+  - Pearson correlation: numpy.corrcoef(entropy_matrix)
+  - Source detection: layer with highest |d(entropy)/dt|
+  - Propagation: detect time lag between source and victim entropy drops
+  - Sliding window prevents memory growth (e.g., keep last 200 steps)
+
+────────────────────────────────────────────────────────────────────────────────
+
+FILE: moewatch/analyzer/risk_score.py  [v0.2.0]
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE
+  Fuses three tier signals into single per-layer collapse risk score
+  (0.0–1.0). Weighted sum: risk = w1*gradient_signal + w2*entropy_signal
+  + w3*spread_signal where w1 > w2 > w3. Provides risk_score, risk_level
+  (LOW/MID/HIGH/CRITICAL), and dominant_signal for explainability.
+
+ENUM: RiskLevel
+────────────────────────────────────────────────────────────────────────────────
+  Values:
+    LOW      = 0    (score < 0.3)
+    MID      = 1    (0.3 ≤ score < 0.6)
+    HIGH     = 2    (0.6 ≤ score < 0.8)
+    CRITICAL = 3    (score ≥ 0.8)
+
+DATACLASS: RiskReport
+────────────────────────────────────────────────────────────────────────────────
+  Fields:
+    layer_name: str
+
+    risk_score: float
+      0.0 (healthy) → 1.0 (imminent collapse)
+
+    risk_level: RiskLevel
+      Categorical classification
+
+    dominant_signal: str
+      "gradient" / "entropy" / "cross_layer" — which tier contributed most
+
+    tier1_contribution: float
+      Weighted gradient starvation signal
+
+    tier2_contribution: float
+      Weighted entropy drift signal
+
+    tier3_contribution: float
+      Weighted cross-layer spread signal
+
+    step: int
+
+CLASS: RiskScoreFuser
+────────────────────────────────────────────────────────────────────────────────
+
+  DOCSTRING
+    """
+    Fuses empirically ordered precursor signals into unified risk score.
+
+    risk = w1*T1_signal + w2*T2_signal + w3*T3_signal
+    where w1 > w2 > w3 (Tier 1 weighted heaviest)
+
+    Provides explainability via dominant_signal and per-tier contributions.
+    """
+
+  ATTRIBUTES
+    config: WatchConfig
+      Configuration reference (for thresholds)
+
+    weights: dict[str, float]
+      Fusion weights: {"tier1": 0.6, "tier2": 0.3, "tier3": 0.1}
+
+    _threshold_map: dict[str, float]
+      Maps signal thresholds to 0.0–1.0 score scale
+
+  METHODS
+
+    __init__(
+        config: WatchConfig,
+        weights: dict[str, float] | None = None
+    )
+      Args:
+        config (WatchConfig) — configuration
+        weights (dict) — optional override fusion weights (must sum to 1.0)
+      Returns: None
+      Docstring: "Initialize fuser with default or custom weights."
+
+    fuse(
+        gradient_report: GradientStarvationReport,
+        entropy_report: LayerEntropyReport,
+        cross_layer_report: CrossLayerReport
+    ) → RiskReport
+      Args:
+        gradient_report (GradientStarvationReport) — Tier 1
+        entropy_report (LayerEntropyReport) — Tier 2
+        cross_layer_report (CrossLayerReport) — Tier 3
+      Returns:
+        RiskReport — fused risk score and explainability
+      Docstring: "Fuse three signals into risk score."
+      Algorithm:
+        1. Normalize each signal to 0.0–1.0 based on thresholds
+        2. Weighted sum: risk = w1*T1 + w2*T2 + w3*T3
+        3. Determine dominant signal (argmax of weighted contributions)
+        4. Classify risk_level based on risk_score
+        5. Return report with all components
+
+DEPENDENCIES
+  → moewatch.analyzer.gradient_starvation (GradientStarvationReport, GradientStarvationAnalyzer) [v0.2.0]
+  → moewatch.analyzer.entropy (LayerEntropyReport)
+  → moewatch.analyzer.cross_layer (CrossLayerReport)
+  → moewatch.config (WatchConfig)
+  → numpy
+
+IMPLEMENTATION NOTES
+  - Default weights: {tier1: 0.6, tier2: 0.3, tier3: 0.1}
+  - Normalization: each signal scaled to 0.0–1.0 using config thresholds
+  - Risk level thresholds: <0.3→LOW, <0.6→MID, <0.8→HIGH, ≥0.8→CRITICAL
+  - Dominant signal: which tier contributed most to risk_score
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 5: INTERVENTION SUBMODULE (moewatch/intervention/)  [v0.2.0]
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+FILE: moewatch/intervention/__init__.py
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE
+  Re-export intervention-related classes.
+
+EXPORTS
+  - InterventionEngine        (class)
+  - AuxLossAction             (class)
+  - RouterNoiseAction         (class)
+  - ExpertDropoutAction       (class)
+  - NoOpAction                (class)
+  - SafetyGuard               (class)
+
+DEPENDENCIES
+  → moewatch.intervention.engine
+  → moewatch.intervention.actions
+  → moewatch.intervention.safety
+
+────────────────────────────────────────────────────────────────────────────────
+
+FILE: moewatch/intervention/actions.py
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE
+  Intervention action classes. Each action is reversible and logs its effect.
+  Four candidate actions: AuxLoss, RouterNoise, ExpertDropout, NoOp.
+
+BASE CLASS: InterventionAction
+────────────────────────────────────────────────────────────────────────────────
+
+  ATTRIBUTES
+    action_type: str
+      Name of action ("aux_loss", "router_noise", etc.)
+
+    layer_name: str
+      Target MoE layer
+
+    applied_step: int
+      Step when applied (-1 if not applied)
+
+    delta: float
+      Magnitude of change
+
+  METHODS
+
+    apply(trainer: transformers.Trainer) → None
+      Args:
+        trainer (transformers.Trainer) — HuggingFace trainer
+      Returns: None
+      Docstring: "Apply action to live training. Modifies trainer state."
+      Abstract: subclasses implement
+
+    revert(trainer: transformers.Trainer) → None
+      Args:
+        trainer (transformers.Trainer) — HuggingFace trainer
+      Returns: None
+      Docstring: "Undo action. Restore previous values."
+      Abstract: subclasses implement
+
+    log() → str
+      Args: None
+      Returns: str — human-readable action description
+      Docstring: "Return log message."
+
+CLASS: AuxLossAction
+────────────────────────────────────────────────────────────────────────────────
+
+  DOCSTRING
+    """
+    Soft load balancing. Increases aux_loss_coef on target layer.
+    Encourages router to distribute tokens more evenly.
+    """
+
+  ATTRIBUTES
+    delta: float
+      Amount to increase aux_loss_coef (e.g., +0.05)
+
+    _original_coef: float
+      Backup of original value for revert
+
+  METHODS
+
+    __init__(layer_name: str, delta: float = 0.05)
+      Args:
+        layer_name (str) — target layer
+        delta (float) — increase amount
+      Returns: None
+
+    apply(trainer: transformers.Trainer) → None
+      Docstring: "Increase aux_loss_coef."
+      Side effects: Modifies trainer.model.config.aux_loss_coef (or equivalent)
+
+    revert(trainer: transformers.Trainer) → None
+      Docstring: "Restore original aux_loss_coef."
+
+CLASS: RouterNoiseAction
+────────────────────────────────────────────────────────────────────────────────
+
+  DOCSTRING
+    """
+    Force exploration. Injects Gaussian noise into router logits.
+    Breaks self-reinforcing feedback loop by introducing randomness.
+    """
+
+  ATTRIBUTES
+    noise_scale: float
+      Standard deviation of injected noise (e.g., 0.1)
+
+  METHODS
+
+    __init__(layer_name: str, noise_scale: float = 0.1)
+      Args:
+        layer_name (str) — target router layer
+        noise_scale (float) — Gaussian std dev
+      Returns: None
+
+    apply(trainer: transformers.Trainer) → None
+      Docstring: "Register forward hook to inject noise."
+      Side effects: Adds temporary hook to router module
+
+    revert(trainer: transformers.Trainer) → None
+      Docstring: "Remove noise injection hook."
+
+CLASS: ExpertDropoutAction
+────────────────────────────────────────────────────────────────────────────────
+
+  DOCSTRING
+    """
+    Prevent over-reliance. Temporarily increases expert dropout probability.
+    Forces router to explore underutilized experts.
+    """
+
+  ATTRIBUTES
+    dropout_delta: float
+      Amount to increase dropout rate (e.g., +0.1)
+
+    _original_dropout: float
+      Backup of original value
+
+  METHODS
+
+    __init__(layer_name: str, dropout_delta: float = 0.1)
+      Args:
+        layer_name (str) — target expert layer
+        dropout_delta (float) — increase in dropout rate
+      Returns: None
+
+    apply(trainer: transformers.Trainer) → None
+      Docstring: "Increase expert dropout."
+
+    revert(trainer: transformers.Trainer) → None
+      Docstring: "Restore original dropout."
+
+CLASS: NoOpAction
+────────────────────────────────────────────────────────────────────────────────
+
+  DOCSTRING
+    """
+    Do nothing. Conservative baseline action. Continues monitoring.
+    """
+
+  METHODS
+
+    apply(trainer: transformers.Trainer) → None
+      Docstring: "No-op (do nothing)."
+
+    revert(trainer: transformers.Trainer) → None
+      Docstring: "No-op (do nothing)."
+
+DEPENDENCIES
+  → moewatch.config (WatchConfig)
+  → transformers (HuggingFace)
+  → torch
+
+IMPLEMENTATION NOTES
+  - All actions must be reversible
+  - Store original values for revert()
+  - Log all changes for auditability
+  - Apply() must handle layer name resolution (use get_submodule)
+
+────────────────────────────────────────────────────────────────────────────────
+
+FILE: moewatch/intervention/safety.py
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE
+  Pre-flight safety checks before any intervention executes. Checks:
+  (1) cooldown not active, (2) intervention delta within limits,
+  (3) training loss not spiking, (4) neighbor layers not under intervention.
+  If any check fails: action downgraded to NoOp. This is the safety backstop.
+
+DATACLASS: SafetyCheckResult
+────────────────────────────────────────────────────────────────────────────────
+  Fields:
+    passed: bool
+      All checks passed
+
+    failures: list[str]
+      List of failed checks (if any)
+
+    recommended_action: InterventionAction
+      Downgraded action if checks failed (otherwise original)
+
+CLASS: SafetyGuard
+────────────────────────────────────────────────────────────────────────────────
+
+  DOCSTRING
+    """
+    Pre-flight safety validation for interventions.
+
+    Enforces:
+      - Cooldown: minimum N steps between interventions per layer
+      - Delta limit: intervention magnitude bounded
+      - Loss guard: training loss spike detection
+      - Neighbor check: adjacent layers stable
+      - Downgrade logic: failed checks → NoOp instead of abort
+    """
+
+  ATTRIBUTES
+    config: WatchConfig
+      Safety thresholds
+
+    _intervention_history: dict[str, int]
+      Last intervention step per layer (for cooldown)
+
+    _loss_baseline: float
+      Reference training loss for spike detection
+
+    _risk_scores: dict[str, float]
+      Latest risk scores per layer (updated via check())
+
+  METHODS
+
+    __init__(config: WatchConfig)
+      Args:
+        config (WatchConfig) — configuration with safety thresholds
+      Returns: None
+
+    check(
+        action: InterventionAction,
+        current_loss: float,
+        risk_scores: dict[str, float],
+        layer_order: list[str]
+    ) → SafetyCheckResult
+      Args:
+        action (InterventionAction) — proposed action
+        current_loss (float) — training loss at current step
+        risk_scores (dict[str, float]) — per-layer risk scores
+        layer_order (list[str]) — ordered layer names
+      Returns:
+        SafetyCheckResult with passed/failures/recommended_action
+      Docstring: "Run all safety checks and return result."
+      Checks:
+        1. Cooldown: (current_step - last_intervention[layer]) > cooldown_steps
+        2. Delta limit: action.delta <= config.intervention_max_delta
+        3. Loss guard: current_loss < baseline * loss_guard_threshold
+        4. Neighbor check: risk_scores[neighbor] < some_threshold
+      Returns: SafetyCheckResult with recommended downgrade if any fail
+
+    update_baseline_loss(loss: float) → None
+      Args:
+        loss (float) — training loss
+      Returns: None
+      Docstring: "Update loss baseline. Called at start of training."
+
+DEPENDENCIES
+  → moewatch.intervention.actions (InterventionAction, NoOpAction)
+  → moewatch.config (WatchConfig)
+
+IMPLEMENTATION NOTES
+  - Cooldown: store step of last intervention per layer, check time elapsed
+  - Loss spike: if loss > baseline * threshold, freeze all actions
+  - Neighbor check: verify adjacent layers have risk_score < threshold
+  - Downgrade: if any check fails, return NoOpAction instead of raising error
+
+────────────────────────────────────────────────────────────────────────────────
+
+FILE: moewatch/intervention/engine.py
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE
+  Receives selected action from Policy. Validates against SafetyGuard
+  before applying. Applies action to live training hyperparameters.
+  Records intervention in BaselineTracker. Schedules revert-on-degradation
+  check after observation window. Maintains cooldown state per layer.
+
+CLASS: InterventionEngine
+────────────────────────────────────────────────────────────────────────────────
+
+  DOCSTRING
+    """
+    Applies interventions to running MoE training.
+
+    Workflow:
+      1. Validate action with SafetyGuard
+      2. Apply action to trainer
+      3. Mark intervention window in BaselineTracker
+      4. Schedule observation window (e.g., 50 steps)
+      5. After window: check if reward positive
+      6. If positive: log success. If negative: revert.
+      7. Update policy with reward feedback
+    """
+
+  ATTRIBUTES
+    config: WatchConfig
+      Configuration
+
+    trainer: transformers.Trainer
+      Reference to HF trainer (trainer.model, trainer.optimizer, etc.)
+
+    safety_guard: SafetyGuard
+      Pre-flight safety validator
+
+    baseline_tracker: BaselineTracker
+      Records intervention-influenced steps
+
+    _active_interventions: dict[str, tuple[InterventionAction, int]]
+      Nested: layer_name → (action, applied_step)
+
+    _observation_windows: dict[str, tuple[int, int]]
+      Nested: layer_name → (start_step, end_step)
+
+    _intervention_log: list[dict]
+      History of all interventions
+
+  METHODS
+
+    __init__(
+        config: WatchConfig,
+        trainer: transformers.Trainer,
+        baseline_tracker: BaselineTracker
+    )
+      Args:
+        config (WatchConfig) — configuration
+        trainer (transformers.Trainer) — HF trainer
+        baseline_tracker (BaselineTracker) — baseline tracker
+      Returns: None
+
+    propose_intervention(
+        action: InterventionAction,
+        current_loss: float,
+        risk_scores: dict[str, float],
+        layer_order: list[str],
+        step: int
+    ) → InterventionAction
+      Args:
+        action (InterventionAction) — proposed action from policy
+        current_loss (float) — training loss
+        risk_scores (dict[str, float]) — per-layer risk scores
+        layer_order (list[str]) — ordered layer names
+        step (int) — current training step
+      Returns:
+        InterventionAction — validated action (may be downgraded to NoOp)
+      Docstring: "Validate action with SafetyGuard and return result."
+      Side effects:
+        - Calls safety_guard.check()
+        - If downgraded: logs reason
+        - Returns either original action or NoOp
+
+    apply_intervention(
+        action: InterventionAction,
+        step: int
+    ) → None
+      Args:
+        action (InterventionAction) — action to apply
+        step (int) — current training step
+      Returns: None
+      Docstring: "Apply action to live training and record in baseline tracker."
+      Side effects:
+        - Calls action.apply(trainer)
+        - Records in _active_interventions
+        - Marks intervention window in baseline_tracker
+        - Schedules observation window (step, step + reward_window_steps)
+        - Logs action details
+
+    check_observation_windows(
+        step: int,
+        risk_scores: dict[str, float],
+        policy: PolicyBase
+    ) → None
+      Args:
+        step (int) — current training step
+        risk_scores (dict[str, float]) — per-layer risk scores
+        policy (PolicyBase) — policy object for update
+      Returns: None
+      Docstring:
+        "Check if any observation windows have expired. Update policy
+        with reward feedback. Revert if degraded."
+      Side effects:
+        - For each expired window:
+          * Compute counterfactual reward from baseline_tracker
+          * If reward > 0: log success, update policy
+          * If reward ≤ 0: call action.revert(trainer), log failure
+          * Update policy with (state, action, reward)
+
+DEPENDENCIES
+  → moewatch.intervention.safety (SafetyGuard)
+  → moewatch.intervention.actions (InterventionAction)
+  → moewatch.collector.baseline_tracker (BaselineTracker)
+  → moewatch.config (WatchConfig)
+  → moewatch.policy.base (PolicyBase)
+  → transformers (HuggingFace)
+  → torch
+
+IMPLEMENTATION NOTES
+  - Store active interventions per layer (one active at a time)
+  - Observation window: typically reward_window_steps (default 50)
+  - Revert logic: call action.revert() if reward negative
+  - All interventions logged for debugging and auditing
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 6: POLICY SUBMODULE (moewatch/policy/)  [v0.2.0]
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+FILE: moewatch/policy/__init__.py
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE
+  Re-export all policy-related classes.
+
+EXPORTS
+  - PolicyBase           (class)
+  - RulePolicy           (class)
+  - BanditPolicy         (class)
+  - PolicyState          (dataclass)
+  - PolicyMemory         (class)
+
+DEPENDENCIES
+  → moewatch.policy.base
+  → moewatch.policy.rule_policy
+  → moewatch.policy.bandit_policy
+  → moewatch.policy.memory
+
+────────────────────────────────────────────────────────────────────────────────
+
+FILE: moewatch/policy/base.py
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE
+  Abstract base class for all policies. Defines interface that RulePolicy
+  and BanditPolicy both implement.
+
+DATACLASS: PolicyState
+────────────────────────────────────────────────────────────────────────────────
+  Fields:
+    risk_score: float
+      Current per-layer collapse risk (0.0–1.0)
+
+    layer_id: int
+      Which MoE layer (0-indexed)
+
+    training_step: int
+      Current training step
+
+    intervention_history: list[str]
+      Recent interventions (action names, e.g. ["aux_loss", "router_noise"])
+
+    dominant_signal: str
+      "gradient" / "entropy" / "cross_layer"
+
+CLASS: PolicyBase (Abstract)
+────────────────────────────────────────────────────────────────────────────────
+
+  DOCSTRING
+    """
+    Abstract interface for intervention selection policies.
+
+    Subclasses: RulePolicy (Phase 1), BanditPolicy (Phase 2)
+    """
+
+  METHODS
+
+    select_action(state: PolicyState) → InterventionAction
+      Args:
+        state (PolicyState) — current system state
+      Returns:
+        InterventionAction — one of {AuxLossAction, RouterNoiseAction, ...}
+      Docstring: "Select intervention action given state."
+      Abstract: subclasses implement
+
+    update(
+        state: PolicyState,
+        action: InterventionAction,
+        reward: float
+    ) → None
+      Args:
+        state (PolicyState) — state when action selected
+        action (InterventionAction) — action taken
+        reward (float) — discounted reward observed
+      Returns: None
+      Docstring: "Update policy with observed feedback."
+      Abstract: subclasses implement
+
+    save_checkpoint(path: str) → None
+      Args:
+        path (str) — file path to save to
+      Returns: None
+      Docstring: "Save policy state to file."
+
+    load_checkpoint(path: str) → None
+      Args:
+        path (str) — file path to load from
+      Returns: None
+      Docstring: "Load policy state from file."
+
+DEPENDENCIES
+  → moewatch.intervention.actions (InterventionAction)
+
+IMPLEMENTATION NOTES
+  - Base class uses ABC and abstractmethod decorators
+  - Subclasses must implement select_action() and update()
+  - Checkpoint format: JSON or pickle (subclass chooses)
+
+────────────────────────────────────────────────────────────────────────────────
+
+FILE: moewatch/policy/rule_policy.py
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE
+  Phase 1 deterministic policy. Maps risk_score ranges to fixed actions.
+  No randomness, safe, explainable. Avoids oscillation and cascade.
+  Establishes behavioral baseline for Phase 2 comparison.
+
+CLASS: RulePolicy (extends PolicyBase)
+────────────────────────────────────────────────────────────────────────────────
+
+  DOCSTRING
+    """
+    Phase 1 deterministic intervention policy.
+
+    Maps risk_score → action deterministically:
+      risk < 0.3  → NoOp (do nothing)
+      risk < 0.6  → AuxLossAction (soft load balancing)
+      risk < 0.8  → RouterNoiseAction (force exploration)
+      risk ≥ 0.8  → ExpertDropoutAction (strongest intervention)
+
+    Avoids oscillation and cascade via:
+      - Cooldown period per layer
+      - Neighbor layer health checks
+      - Intervention history tracking
+    """
+
+  ATTRIBUTES
+    config: WatchConfig
+      Configuration
+
+    _recent_actions: dict[str, list[str]]
+      Recent actions per layer (for oscillation detection)
+
+    _action_sequence: dict[str, str]
+      Action type per layer (for cascade prevention)
+
+  METHODS
+
+    __init__(config: WatchConfig)
+      Args:
+        config (WatchConfig) — configuration
+      Returns: None
+
+    select_action(state: PolicyState) → InterventionAction
+      Args:
+        state (PolicyState) — current state with risk_score
+      Returns:
+        InterventionAction — action based on risk threshold
+      Docstring: "Select action based on risk_score threshold."
+      Algorithm:
+        1. If risk_score < 0.3: return NoOpAction
+        2. Else if risk_score < 0.6: return AuxLossAction
+        3. Else if risk_score < 0.8: return RouterNoiseAction
+        4. Else: return ExpertDropoutAction
+
+    update(state: PolicyState, action: InterventionAction, reward: float) → None
+      Args:
+        state (PolicyState) — state
+        action (InterventionAction) — action taken
+        reward (float) — observed reward
+      Returns: None
+      Docstring: "Log action and reward for analysis (deterministic policy doesn't learn)."
+      Side effects: Updates _recent_actions history
+
+    save_checkpoint(path: str) → None
+      Args:
+        path (str) — file path
+      Returns: None
+      Docstring: "Save policy state. (RulePolicy has minimal state)"
+
+    load_checkpoint(path: str) → None
+      Args:
+        path (str) — file path
+      Returns: None
+      Docstring: "Load policy state."
+
+DEPENDENCIES
+  → moewatch.policy.base (PolicyBase, PolicyState)
+  → moewatch.intervention.actions (AuxLossAction, RouterNoiseAction, ExpertDropoutAction, NoOpAction)
+  → moewatch.config (WatchConfig)
+
+IMPLEMENTATION NOTES
+  - Thresholds hardcoded: 0.3, 0.6, 0.8 (tunable via config if needed)
+  - Deterministic: same state → same action always
+  - No learning: update() only logs, doesn't modify behavior
+  - Oscillation prevention: track recent actions, avoid same action twice
+
+────────────────────────────────────────────────────────────────────────────────
+
+FILE: moewatch/policy/bandit_policy.py
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE
+  Phase 2 contextual bandit. State vector: (risk_score, layer_id,
+  training_step, intervention_history). Action space:
+  {NoOp, AuxLoss, RouterNoise, ExpertDropout}. Algorithm: epsilon-greedy
+  or Thompson Sampling. Reward: discounted counterfactual ΔH. Updates
+  linear value estimates per action-context pair. Saves policy memory
+  to checkpoint.
+
+CLASS: BanditPolicy (extends PolicyBase)
+────────────────────────────────────────────────────────────────────────────────
+
+  DOCSTRING
+    """
+    Phase 2 contextual bandit policy. Learns which interventions work
+    at which training stages.
+
+    State: (risk_score, layer_id, step, intervention_history)
+    Action: {NoOp, AuxLoss, RouterNoise, ExpertDropout}
+    Reward: discounted counterfactual ΔH over observation window
+    Algorithm: epsilon-greedy exploration with Q-learning value updates
+    """
+
+  ATTRIBUTES
+    config: WatchConfig
+      Configuration (epsilon, gamma, etc.)
+
+    memory: PolicyMemory
+      Experience replay buffer
+
+    _q_values: dict[str, dict[str, float]]
+      Nested: state_hash → action_name → estimated value
+
+    _action_counts: dict[str, dict[str, int]]
+      Nested: state_hash → action_name → visit count
+
+    _step: int
+      Internal step counter for exploration scheduling
+
+  METHODS
+
+    __init__(config: WatchConfig)
+      Args:
+        config (WatchConfig) — configuration (epsilon, gamma, etc.)
+      Returns: None
+
+    select_action(state: PolicyState) → InterventionAction
+      Args:
+        state (PolicyState) — current state
+      Returns:
+        InterventionAction — selected action
+      Docstring:
+        "Select action using epsilon-greedy. With probability epsilon,
+        explore (random action). Else exploit (best Q-value)."
+      Algorithm:
+        1. Hash state to state_key
+        2. Get Q-values for all actions in this state
+        3. If random() < epsilon: select random action
+        4. Else: select action with max Q-value
+        5. Return action object
+
+    update(state: PolicyState, action: InterventionAction, reward: float) → None
+      Args:
+        state (PolicyState) — state
+        action (InterventionAction) — action taken
+        reward (float) — observed reward
+      Returns: None
+      Docstring: "Update Q-values and policy memory with new experience."
+      Side effects:
+        - Stores (state, action, reward) in memory
+        - Updates Q(state, action) ← Q + α * (reward - Q)
+        - Increments action count for this state-action pair
+
+    save_checkpoint(path: str) → None
+      Args:
+        path (str) — file path to save to
+      Returns: None
+      Docstring: "Save Q-values and memory to JSON."
+
+    load_checkpoint(path: str) → None
+      Args:
+        path (str) — file path to load from
+      Returns: None
+      Docstring: "Load Q-values and memory from JSON."
+
+DEPENDENCIES
+  → moewatch.policy.base (PolicyBase, PolicyState)
+  → moewatch.policy.memory (PolicyMemory)
+  → moewatch.intervention.actions
+  → moewatch.config (WatchConfig)
+  → json
+
+IMPLEMENTATION NOTES
+  - Q-learning: Q(s, a) ← Q(s, a) + α * (r - Q(s, a))
+  - Learning rate α: typically 0.1
+  - Epsilon decay: optionally decrease epsilon over time
+  - State hashing: convert PolicyState to string key for Q-table lookup
+  - Action set: ["no_op", "aux_loss", "router_noise", "expert_dropout"]
+
+────────────────────────────────────────────────────────────────────────────────
+
+FILE: moewatch/policy/memory.py
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE
+  Stores (state, action, reward) tuples across training run. Supports
+  replay for batch value updates. Serializable to JSON for cross-run
+  transfer. Provides action_success_rate() and context_similarity()
+  for Thompson Sampling priors. Maximum memory size configurable to
+  prevent unbounded growth.
+
+DATACLASS: ExperienceTuple
+────────────────────────────────────────────────────────────────────────────────
+  Fields:
+    state: PolicyState
+
+    action: str
+      Action name (e.g., "aux_loss")
+
+    reward: float
+      Observed reward
+
+    step: int
+      Training step when recorded
+
+CLASS: PolicyMemory
+────────────────────────────────────────────────────────────────────────────────
+
+  DOCSTRING
+    """
+    Replay buffer for policy experience. Stores and retrieves
+    (state, action, reward) tuples. Supports cross-run transfer.
+    """
+
+  ATTRIBUTES
+    max_size: int
+      Maximum number of tuples to store (circular buffer)
+
+    _buffer: collections.deque[ExperienceTuple]
+      Circular buffer of experiences
+
+    _action_rewards: dict[str, list[float]]
+      Per-action reward history for statistics
+
+  METHODS
+
+    __init__(max_size: int = 10000)
+      Args:
+        max_size (int) — maximum buffer size
+      Returns: None
+
+    append(state: PolicyState, action: str, reward: float, step: int) → None
+      Args:
+        state (PolicyState) — state
+        action (str) — action name
+        reward (float) — reward
+        step (int) — training step
+      Returns: None
+      Docstring: "Add experience tuple to buffer."
+      Side effects: Drops oldest tuple if buffer full
+
+    get_batch(batch_size: int) → list[ExperienceTuple]
+      Args:
+        batch_size (int) — number of random samples
+      Returns:
+        list[ExperienceTuple] — random sample from buffer
+      Docstring: "Sample random batch for replay."
+
+    action_success_rate(action: str) → float
+      Args:
+        action (str) — action name
+      Returns:
+        float — fraction of times this action had reward > 0
+      Docstring: "Estimate success probability of action."
+
+    context_similarity(state: PolicyState) → list[ExperienceTuple]
+      Args:
+        state (PolicyState) — reference state
+      Returns:
+        list[ExperienceTuple] — similar experiences (by risk_score, layer_id)
+      Docstring: "Find similar past experiences."
+
+    to_json(path: str) → None
+      Args:
+        path (str) — file path to save to
+      Returns: None
+      Docstring: "Serialize to JSON for transfer."
+
+    from_json(path: str) → None
+      Args:
+        path (str) — file path to load from
+      Returns: None
+      Docstring: "Deserialize from JSON."
+
+DEPENDENCIES
+  → moewatch.policy.base (PolicyState)
+  → json
+  → collections
+
+IMPLEMENTATION NOTES
+  - Use deque with maxlen for circular buffer
+  - Serialize PolicyState as dict (not pickle, for portability)
+  - Similarity: L2 distance on (risk_score, layer_id) features
+  - Success rate: count positive rewards / total for action
+
+────────────────────────────────────────────────────────────────────────────────
+
+FILE: moewatch/policy/reward.py
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE
+  Computes discounted counterfactual reward for completed intervention.
+  reward = Σ ΔH_counterfactual(t+k) * γ^k for k=1..K. ΔH_counterfactual
+  from BaselineTracker. Exponential discount factor γ (default 0.95).
+  Observation window K (default 50 steps).
+
+CLASS: RewardComputer
+────────────────────────────────────────────────────────────────────────────────
+
+  DOCSTRING
+    """
+    Computes discounted counterfactual reward for interventions.
+
+    reward = Σ ΔH_counterfactual(t+k) * γ^k   for k = 1 to K
+
+    where:
+      ΔH_counterfactual = entropy_actual - entropy_baseline
+      γ = discount factor (typically 0.95)
+      K = observation window (typically 50 steps)
+
+    Positive reward = intervention helped routing stability.
+    """
+
+  ATTRIBUTES
+    config: WatchConfig
+      Configuration (gamma, window_steps)
+
+    baseline_tracker: BaselineTracker
+      Source of counterfactual baseline values
+
+  METHODS
+
+    __init__(config: WatchConfig, baseline_tracker: BaselineTracker)
+      Args:
+        config (WatchConfig) — configuration
+        baseline_tracker (BaselineTracker) — baseline source
+      Returns: None
+
+    compute_reward(
+        layer_name: str,
+        entropy_values: list[float],
+        start_step: int,
+        end_step: int
+    ) → float
+      Args:
+        layer_name (str) — target layer
+        entropy_values (list[float]) — entropy values over observation window
+        start_step (int) — step when intervention applied
+        end_step (int) — step when observation window closed
+      Returns:
+        float — discounted counterfactual reward
+      Docstring:
+        "Compute reward as discounted sum of counterfactual deltas."
+      Algorithm:
+        1. For k = 1 to K:
+           - delta_k = entropy_values[k] - baseline_tracker.get_baseline(layer, start+k)
+           - reward += delta_k * (gamma ** k)
+        2. Return reward
+
+DEPENDENCIES
+  → moewatch.collector.baseline_tracker (BaselineTracker)
+  → moewatch.config (WatchConfig)
+  → numpy
+
+IMPLEMENTATION NOTES
+  - Discount factor γ typically 0.95 (later steps contribute less)
+  - Window K typically 50 steps (observation period)
+  - ΔH_counterfactual computed as actual - baseline (positive = improvement)
+  - Handle missing baseline: use 0 delta if baseline not available
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SECTION 7: REPORT SUBMODULE (moewatch/report/)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+PURPOSE
+-------
+  Rich-based terminal dashboard and reporting system.
+  Provides structured and well aligned, colorful, minimal, and detailed
+  CLI visualization for live MoEWatch monitoring.
+
+OUTPUT SYSTEM
+-------------
+  MoEWatch uses the Rich Python library as the primary terminal
+  visualization backend, providing structured and well aligned, colorful, minimal,
+  and detailed real-time monitoring dashboards for training-time
+  observability and intervention tracking.
+
+FILE: moewatch/report/__init__.py
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE
+  Re-export all report-related classes.
+
+EXPORTS
+  - AuditReport         (class)
+  - WatchReport         (class) [v0.2.0]
+  - CLIReporter         (class)
+  - JSONReporter        (class) [v0.2.0]
+
+DEPENDENCIES
+  → moewatch.report.audit_report
+  → moewatch.report.watch_report
+  → moewatch.report.cli_reporter
+  → moewatch.report.json_reporter
+
+────────────────────────────────────────────────────────────────────────────────
+
+FILE: moewatch/report/audit_report.py
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE
+  Structured result from offline audit(). Holds per-layer entropy results,
+  collapse reports, gradient starvation report, cross-layer propagation
+  report, risk scores, intervention log. Immutable dataclass.
+
+DATACLASS: AuditReport
+────────────────────────────────────────────────────────────────────────────────
+
+  Fields:
+    model_name: str
+      Name of audited model
+
+    timestamp: float
+      Unix timestamp of audit
+
+    num_batches: int
+      Batches processed
+
+    entropy_results: dict[str, LayerEntropyReport]
+      Per-layer entropy analysis
+
+    collapse_results: dict[str, LayerCollapseReport]
+      Per-layer expert health state
+
+    gradient_results: dict[str, dict[int, GradientStarvationReport]]  [v0.2.0]
+      Per-expert gradient analysis
+
+    cross_layer_results: CrossLayerReport  [v0.2.0]
+      Cross-layer correlation analysis
+
+    risk_scores: dict[str, RiskReport]  [v0.2.0]
+      Per-layer fused risk scores
+
+    dead_experts_count: int
+      Total dead experts across all layers
+
+    critical_layers: list[str]
+      Layers with risk_level == CRITICAL
+
+  METHODS
+
+    summary() → str
+      Returns: str — human-readable summary
+      Docstring: "Return text summary of audit findings."
+
+    dead_experts() → list[tuple[str, int]]
+      Returns: list[(layer_name, expert_id), ...]
+      Docstring: "List all dead experts."
+
+    to_json(path: str) → None
+      Args:
+        path (str) — file path
+      Returns: None
+      Docstring: "Save audit to JSON file."
+
+    to_dataframe() → pandas.DataFrame
+      Returns: DataFrame — audit data in tabular form
+      Docstring: "Convert to pandas DataFrame for analysis."
+
+DEPENDENCIES
+  → moewatch.analyzer (all report types)
+  → moewatch.config (WatchConfig)
+  → json
+  → pandas (optional, for to_dataframe)
+  → datetime
+
+IMPLEMENTATION NOTES
+  - Immutable: use frozen=True on dataclass
+  - Summary: format key findings in plaintext
+  - to_json: recursively convert nested dataclasses
+  - Timestamp: use time.time() or datetime.now()
+
+────────────────────────────────────────────────────────────────────────────────
+
+FILE: moewatch/report/watch_report.py  [v0.2.0]
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE
+  Live training report generated at each step() call. Includes current
+  risk scores, active interventions, policy decisions, counterfactual
+  reward estimates, and alert log since last call. Replaces raw Alert
+  list for richer introspection.
+
+DATACLASS: StepReport
+────────────────────────────────────────────────────────────────────────────────
+  Fields (per step):
+    step: int
+      Training step number
+
+    timestamp: float
+      Unix timestamp
+
+    risk_scores: dict[str, float]
+      Per-layer risk score (0.0–1.0)
+
+    risk_levels: dict[str, str]
+      Per-layer risk level ("LOW", "MID", "HIGH", "CRITICAL")
+
+    active_interventions: list[InterventionAction]
+      Interventions applied at this step
+
+    policy_decisions: dict[str, str]
+      Per-layer action selected by policy
+
+    counterfactual_rewards: dict[str, float]
+      Rewards from recently closed observation windows
+
+    alerts: list[Alert]
+      New alerts since last report
+
+    loss: float
+      Training loss at this step
+
+    dominant_signals: dict[str, str]
+      Per-layer which signal (Tier 1/2/3) contributed most
+
+CLASS: WatchReport
+────────────────────────────────────────────────────────────────────────────────
+
+  DOCSTRING
+    """
+    Aggregated monitoring report from one or more training steps.
+    Contains risk scores, interventions, rewards, and alerts.
+    """
+
+  ATTRIBUTES
+    steps: list[StepReport]
+      Per-step reports
+
+    start_step: int
+      First step in report
+
+    end_step: int
+      Last step in report
+
+    num_interventions: int
+      Total interventions in period
+
+    num_alerts: int
+      Total alerts in period
+
+  METHODS
+
+    to_json(path: str) → None
+      Args:
+        path (str) — file path
+      Returns: None
+      Docstring: "Save report to JSON."
+
+    summary() → str
+      Returns: str — text summary
+      Docstring: "Return human-readable summary of report."
+
+DEPENDENCIES
+  → moewatch._watcher (Alert)
+  → moewatch.intervention.actions
+  → moewatch.analyzer.risk_score (RiskReport)
+  → json
+  → datetime
+
+IMPLEMENTATION NOTES
+  - Append step reports as training progresses
+  - Keep only recent reports (configurable window, e.g., last 1000 steps)
+  - to_json: serialize all nested objects recursively
+
+────────────────────────────────────────────────────────────────────────────────
+
+FILE: moewatch/report/cli_reporter.py
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE
+  ANSI terminal output. Renders: routing health dashboard, expert
+  utilization histograms per layer, entropy bars with trend arrows,
+  risk score meters, active intervention log, policy memory summary.
+  NO_COLOR fallback. Respects terminal width.
+
+CLASS: CLIReporter
+────────────────────────────────────────────────────────────────────────────────
+
+  DOCSTRING
+    """
+    Renders rich terminal-based monitoring dashboard.
+
+    Sections:
+      - Routing health summary (per-layer risk scores)
+      - Expert utilization histogram
+      - Entropy trend with arrows
+      - Risk score gauges
+      - Active interventions log
+      - Policy memory statistics
+    """
+
+  ATTRIBUTES
+    config: WatchConfig
+      Configuration (output, no_color)
+
+    _term_width: int
+      Terminal width (for formatting)
+
+  METHODS
+
+    __init__(config: WatchConfig)
+      Args:
+        config (WatchConfig) — configuration
+      Returns: None
+
+    render_dashboard(
+        watch_report: WatchReport,
+        entropy_analyzer: EntropyAnalyzer,
+        collapse_detector: CollapseDetector,
+        risk_fuser: RiskScoreFuser
+    ) → str
+      Args:
+        watch_report (WatchReport) — current report
+        entropy_analyzer (EntropyAnalyzer) — for entropy trends
+        collapse_detector (CollapseDetector) — for expert states
+        risk_fuser (RiskScoreFuser) — for risk scores
+      Returns:
+        str — formatted ANSI dashboard
+      Docstring: "Render full monitoring dashboard."
+      Sections:
+        1. Header: MoEWatch, version, timestamp
+        2. Risk scores per layer: color-coded meter
+        3. Expert utilization: bar chart
+        4. Entropy trend: line chart with arrows
+        5. Active interventions: table
+        6. Policy memory: action success rates
+        7. Footer: step, elapsed time
+
+    render_alert(alert: Alert) → str
+      Args:
+        alert (Alert) — alert object
+      Returns:
+        str — formatted alert line
+      Docstring: "Format single alert for display."
+
+DEPENDENCIES
+  → moewatch.report.watch_report (WatchReport)
+  → moewatch.config (WatchConfig)
+  → moewatch.analyzer (EntropyAnalyzer, CollapseDetector, RiskScoreFuser)
+  → os (for NO_COLOR env var)
+
+IMPLEMENTATION NOTES
+  - Use ANSI escape codes for colors: \033[31m (red), \033[32m (green), etc.
+  - Respect NO_COLOR env var: if set, strip all color codes
+  - Detect terminal width: shutil.get_terminal_size()
+  - Handle narrow terminals: wrap text and omit less critical info
+  - Refresh rate: typically print every log_every steps
+
+────────────────────────────────────────────────────────────────────────────────
+
+FILE: moewatch/report/json_reporter.py  [v0.2.0]
+────────────────────────────────────────────────────────────────────────────────
+
+PURPOSE
+  Newline-delimited JSON for log aggregators (Grafana, Splunk, W&B custom
+  metrics). Every step() produces one JSON line with all metrics, risk
+  scores, and intervention decisions. Suitable for real-time dashboards
+  and experiment tracking pipelines.
+
+CLASS: JSONReporter
+────────────────────────────────────────────────────────────────────────────────
+
+  DOCSTRING
+    """
+    Emits newline-delimited JSON for log aggregation systems.
+
+    One JSON line per training step. Contains all metrics in flat or
+    nested structure suitable for indexing (Elasticsearch) and
+    dashboarding (Grafana).
+    """
+
+  ATTRIBUTES
+    config: WatchConfig
+      Configuration
+
+    output_file: str | None
+      Optional file path to write JSON lines to
+
+  METHODS
+
+    __init__(config: WatchConfig, output_file: str | None = None)
+      Args:
+        config (WatchConfig) — configuration
+        output_file (str | None) — optional file path for JSON lines
+      Returns: None
+
+    emit_step(
+        step: int,
+        timestamp: float,
+        risk_scores: dict[str, float],
+        loss: float,
+        interventions: list[InterventionAction],
+        alerts: list[Alert]
+    ) → str
+      Args:
+        step (int) — training step
+        timestamp (float) — unix timestamp
+        risk_scores (dict[str, float]) — per-layer risk
+        loss (float) — training loss
+        interventions (list[InterventionAction]) — applied actions
+        alerts (list[Alert]) — new alerts
+      Returns:
+        str — JSON string (one line)
+      Docstring: "Generate JSON line for one step."
+      Format (example):
+        {
+          "step": 1000,
+          "timestamp": 1623456789.5,
+          "loss": 2.345,
+          "risks": {"layers.0": 0.25, "layers.5": 0.72},
+          "interventions": ["aux_loss@layers.5"],
+          "alerts": [{"level": "WARNING", "message": "..."}]
+        }
+
+    write_step(
+        step: int,
+        timestamp: float,
+        risk_scores: dict[str, float],
+        loss: float,
+        interventions: list[InterventionAction],
+        alerts: list[Alert]
+    ) → None
+      Args: (same as emit_step)
+      Returns: None
+      Docstring: "Emit step and write to output file (if configured)."
+      Side effects: Appends to output_file (or stdout if not configured)
+
+DEPENDENCIES
+  → moewatch.report.watch_report (WatchReport)
+  → moewatch.config (WatchConfig)
+  → moewatch.intervention.actions
+  → moewatch._watcher (Alert)
+  → json
+  → sys
+
+IMPLEMENTATION NOTES
+  - Use json.dumps() with ensure_ascii=False for UTF-8
+  - Flatten nested structures if using Elasticsearch indexing
+  - Include timestamp for log correlation
+  - Write to stdout if output_file is None (for containerized logging)
+  - Append mode: open(output_file, 'a') for continuous logging
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DEPENDENCIES SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Core External Dependencies:
+  torch              ≥ 0.2.0    — PyTorch (gradient computation, tensor ops)
+  numpy              —          — numerical arrays (linear regression, stats)
+  transformers       —          — HuggingFace (Trainer integration, model access)
+
+Optional:
+  pandas             —          — for to_dataframe() methods (audit report)
+  scipy              —          — correlation p-values (cross_layer analyzer)
+  sklearn            —          — linear regression (baseline tracker, optional)
+
+Internal Submodule Dependencies:
+  moewatch/config.py              ← referenced by all other modules
+  moewatch/hooks/manager.py       ← used by MoEWatch, _audit
+  moewatch/collector/stat_collector.py ← used by hooks, analyzers
+  moewatch/analyzer/entropy.py    ← used by risk_fuser, cross_layer
+  moewatch/analyzer/collapse.py   ← used by MoEWatch
+  moewatch/analyzer/gradient_starvation.py [v0.2.0] ← used by risk_fuser
+  moewatch/analyzer/cross_layer.py [v0.2.0] ← used by risk_fuser
+  moewatch/analyzer/risk_score.py [v0.2.0] ← used by MoEWatch, reports
+  moewatch/intervention/engine.py [v0.2.0] ← used by MoEWatch
+  moewatch/policy/base.py [v0.2.0] ← abstract interface
+  moewatch/policy/rule_policy.py [v0.2.0] ← used by MoEWatch
+  moewatch/policy/bandit_policy.py [v0.2.0] ← used by MoEWatch
+  moewatch/report/audit_report.py ← returned by audit()
+  moewatch/report/watch_report.py [v0.2.0] ← returned by step()
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+KEY DESIGN PRINCIPLES & ARCHITECTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. SIGNAL TIER HIERARCHY (Empirically Ordered)
+   ────────────────────────────────────────────
+   Tier 1: Gradient Starvation (earliest, 50–200 steps before collapse)
+   Tier 2: Entropy Drift (intermediate, 30–100 steps before)
+   Tier 3: Cross-Layer Correlation (localization, system-level)
+
+   Risk Score: Weighted fusion via RiskScoreFuser
+               risk = 0.6*T1 + 0.3*T2 + 0.1*T3
+
+2. INTERVENTION-CONDITIONED COUNTERFACTUAL BASELINE
+   ─────────────────────────────────────────────────
+   Critical for causal attribution. BaselineTracker maintains rolling
+   linear regression on "clean" history (pre-intervention steps only).
+   Prevents baseline contamination by excluding post-intervention windows.
+
+   Reward = actual_signal - baseline_projected
+   Used by policy for learning which actions work.
+
+3. TWO-PHASE POLICY ARCHITECTURE
+   ──────────────────────────────
+   Phase 1 (RulePolicy): Deterministic, threshold-based. Stable baseline.
+   Phase 2 (BanditPolicy): Learning contextual bandit. Improves within run.
+
+   Both share PolicyBase interface. Config switches via policy_type.
+
+4. SAFETY-FIRST INTERVENTION
+   ──────────────────────────
+   SafetyGuard enforces pre-flight checks:
+     - Cooldown: spacing between interventions
+     - Delta limit: bounded magnitude changes
+     - Loss guard: freeze on training loss spike
+     - Neighbor check: adjacent layer stability
+
+   Failed checks → downgrade to NoOp (don't abort).
+
+5. ZERO WEIGHT MODIFICATION GUARANTEE
+   ────────────────────────────────────
+   Hooks are read-only. Modifications go through trainer API only.
+   This protects against accidental model corruption.
+
+6. THREAD-SAFE EVENT COLLECTION
+   ──────────────────────────────
+   RingBuffer + StatCollector + Lock = safe concurrent access.
+   Necessary for real-time monitoring during training.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+QUICK REFERENCE: FILE ORGANIZATION BY RESPONSIBILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+DATA COLLECTION (hooks/ + collector/)
+  ├── hooks/manager.py           — attach/detach lifecycle
+  ├── hooks/router_hook.py       — capture routing events
+  ├── hooks/gradient_hook.py     — capture gradient events (v0.2.0)
+  ├── hooks/detection.py         — auto-detect router modules
+  ├── collector/ring_buffer.py   — fixed-memory circular buffer
+  └── collector/stat_collector.py — aggregate events into statistics
+
+SIGNAL ANALYSIS (analyzer/)
+  ├── analyzer/entropy.py           — Tier 2: entropy drift
+  ├── analyzer/collapse.py          — expert health state
+  ├── analyzer/gradient_starvation.py — Tier 1: gradient starvation (v0.2.0)
+  ├── analyzer/cross_layer.py       — Tier 3: cross-layer correlation (v0.2.0)
+  ├── analyzer/cusum.py             — change-point detection (v0.2.0)
+  └── analyzer/risk_score.py        — signal fusion (v0.2.0)
+
+INTERVENTION & CONTROL (intervention/ + policy/)
+  ├── intervention/actions.py       — action implementations
+  ├── intervention/safety.py        — pre-flight validation
+  ├── intervention/engine.py        — apply & measure (v0.2.0)
+  ├── policy/base.py                — abstract interface (v0.2.0)
+  ├── policy/rule_policy.py         — Phase 1: deterministic (v0.2.0)
+  ├── policy/bandit_policy.py       — Phase 2: learning (v0.2.0)
+  ├── policy/memory.py              — experience replay (v0.2.0)
+  └── policy/reward.py              — discount reward computation (v0.2.0)
+
+ORCHESTRATION & REPORTING
+  ├── _watcher.py          — main class: coordinates all above
+  ├── _audit.py            — offline diagnostic
+  ├── config.py            — centralized configuration
+  ├── report/audit_report.py — offline results
+  ├── report/watch_report.py — live training reports (v0.2.0)
+  ├── report/cli_reporter.py — terminal dashboard
+  └── report/json_reporter.py — JSON logging (v0.2.0)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+IMPLEMENTATION CHECKLIST (Phased)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+PHASE 1: INFRASTRUCTURE
+  ☐ config.py — WatchConfig dataclass + enums
+  ☐ hooks/detection.py — detect_router_modules()
+  ☐ hooks/router_hook.py — RouterForwardHook + RoutingEvent
+  ☐ collector/ring_buffer.py — RingBuffer class
+  ☐ collector/stat_collector.py — StatCollector + LayerStats
+
+PHASE 2: ANALYSIS (Tier 1+2)
+  ☐ analyzer/entropy.py — EntropyAnalyzer (Tier 2)
+  ☐ analyzer/collapse.py — CollapseDetector
+  ☐ analyzer/cusum.py — CUSUMDetector (v0.2.0)
+  ☐ hooks/gradient_hook.py — GradientStarvationHook (v0.2.0)
+  ☐ analyzer/gradient_starvation.py — GradientStarvationAnalyzer (v0.2.0)
+
+PHASE 3: CROSS-LAYER & FUSION (Tier 3)
+  ☐ analyzer/cross_layer.py — CrossLayerCorrelation (v0.2.0)
+  ☐ analyzer/risk_score.py — RiskScoreFuser (v0.2.0)
+  ☐ collector/baseline_tracker.py — BaselineTracker (v0.2.0)
+
+PHASE 4: INTERVENTION & CONTROL (Phase 1)
+  ☐ intervention/actions.py — action classes (v0.2.0)
+  ☐ intervention/safety.py — SafetyGuard (v0.2.0)
+  ☐ intervention/engine.py — InterventionEngine (v0.2.0)
+  ☐ policy/base.py — PolicyBase (v0.2.0)
+  ☐ policy/rule_policy.py — RulePolicy (v0.2.0)
+
+PHASE 5: LEARNING & REPORTING
+  ☐ policy/memory.py — PolicyMemory (v0.2.0)
+  ☐ policy/reward.py — RewardComputer (v0.2.0)
+  ☐ policy/bandit_policy.py — BanditPolicy (v0.2.0)
+  ☐ report/audit_report.py — AuditReport
+  ☐ report/watch_report.py — WatchReport (v0.2.0)
+
+PHASE 6: ORCHESTRATION
+  ☐ hooks/manager.py — HookManager
+  ☐ _audit.py — audit() function
+  ☐ _watcher.py — MoEWatch + MoEWatchCallback
+  ☐ report/cli_reporter.py — CLIReporter
+  ☐ report/json_reporter.py — JSONReporter (v0.2.0)
+
+PHASE 7: PUBLIC API
+  ☐ __init__.py — exports + lazy imports
+
+═════════════════════════════════════════════════════════════════════════════════
+
+END OF ARCHITECTURE
+
+This document is your pre-defined schema. Reference it whenever you write new code
+without needing to dive into the codebase. Keep it updated as you add features.
+
+For detailed specifications, refer to:
+  - v0_2_0.txt — problem statement, solution, evaluation protocol
+  - project_structure.md — full file listing
+  - novelty_assessment.txt — research positioning

@@ -843,3 +843,130 @@ class TestEntropyAnalyzerEdgeCases:
         assert n_routing_before == n_routing_after, (
             "analyze() modified the number of routing layers in StatCollector"
         )
+
+# ===========================================================================
+# ── Section 5: Internal Helpers & Defensive Branches ───────────────────────
+# ===========================================================================
+
+from unittest.mock import MagicMock
+import torch
+
+
+def test_softmax_to_probs_invalid_shape():
+    from moewatch.analyzer.entropy import _softmax_to_probs
+
+    tensor = torch.empty(0)
+
+    result = _softmax_to_probs(tensor)
+
+    assert result.shape == (1,)
+    assert result[0] == 1.0
+
+
+def test_reset_single_layer(default_config):
+    analyzer = EntropyAnalyzer(default_config)
+
+    analyzer._entropy_history["layer0"] = [1.0]
+    analyzer._expert_counts["layer0"] = 4
+    analyzer._latest_steps["layer0"] = 100
+
+    analyzer.reset("layer0")
+
+    assert "layer0" not in analyzer._entropy_history
+    assert "layer0" not in analyzer._expert_counts
+    assert "layer0" not in analyzer._latest_steps
+
+
+def test_reset_all_layers(default_config):
+    analyzer = EntropyAnalyzer(default_config)
+
+    analyzer._entropy_history["a"] = [1]
+    analyzer._entropy_history["b"] = [2]
+
+    analyzer.reset()
+
+    assert analyzer._entropy_history == {}
+    assert analyzer._expert_counts == {}
+    assert analyzer._latest_steps == {}
+    assert analyzer._cusum_detectors == {}
+
+
+def test_get_entropy_history_unknown_layer(default_config):
+    analyzer = EntropyAnalyzer(default_config)
+
+    assert analyzer.get_entropy_history("missing") == []
+
+
+def test_repr(default_config):
+    analyzer = EntropyAnalyzer(default_config)
+
+    text = repr(analyzer)
+
+    assert "EntropyAnalyzer" in text
+    assert "layers=" in text
+
+
+def test_analyze_handles_get_all_stats_exception(default_config):
+    analyzer = EntropyAnalyzer(default_config)
+
+    collector = MagicMock()
+    collector.get_all_stats.side_effect = RuntimeError("boom")
+
+    result = analyzer.analyze(collector)
+
+    assert result == {}
+
+
+def test_analyze_layer_exception_generates_default_report(default_config):
+    analyzer = EntropyAnalyzer(default_config)
+
+    class BrokenLayer:
+        @property
+        def raw_logits_window(self):
+            raise RuntimeError("broken")
+
+    collector = MagicMock()
+
+    collector.get_all_stats.return_value = {
+        "routing": {
+            "layer0": BrokenLayer()
+        }
+    }
+
+    result = analyzer.analyze(collector)
+
+    assert "layer0" in result
+    assert result["layer0"].layer_name == "layer0"
+
+
+def test_history_trimming_branch(default_config):
+    analyzer = EntropyAnalyzer(default_config)
+
+    layer = "layer0"
+
+    analyzer._entropy_history[layer] = [0.5] * 100
+    analyzer._cusum_detectors[layer] = MagicMock()
+    analyzer._cusum_detectors[layer].update.return_value = False
+    analyzer._expert_counts[layer] = 4
+    analyzer._latest_steps[layer] = 0
+
+    class Layer:
+        step = 1
+        expert_utilization = torch.tensor([0.25, 0.25, 0.25, 0.25])
+        raw_logits_window = None
+
+    analyzer._analyze_layer(layer, Layer())
+
+    assert len(analyzer._entropy_history[layer]) <= 80
+
+
+def test_get_entropy_history_returns_copy(default_config):
+    analyzer = EntropyAnalyzer(default_config)
+
+    analyzer._entropy_history["layer0"] = [1.0, 2.0]
+
+    history = analyzer.get_entropy_history("layer0")
+
+    history.append(99)
+
+    assert analyzer._entropy_history["layer0"] == [1.0, 2.0]

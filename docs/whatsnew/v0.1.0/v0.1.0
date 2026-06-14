@@ -1,0 +1,774 @@
+moewatch  MoE Diagnostic & Audit Library
+Complete Technical Specification  •  Post-Research Edition
+pip install moewatch
+
+Author: Abinesh  •  GitHub: Abineshabee
+Document Version: v0.1.0 •  June 2026  •  Post-Competitive Research
+
+
+======================================================================
+1. WHAT IS MOEWATCH?
+======================================================================
+
+moewatch is a lightweight, pip-installable Python library that attaches
+to any existing Mixture-of-Experts (MoE) model in HuggingFace
+Transformers and gives you real-time diagnostics, training-time alerts,
+and actionable fix suggestions — without replacing your training setup.
+
+Think of it as pytest for MoE training. Just as pytest does not replace
+your code — it audits it — moewatch does not replace your trainer. It
+sits beside it and tells you when something is wrong before you waste a
+GPU-day on a collapsed model.
+
+What moewatch IS:
+  - A plug-in diagnostic tool for existing HuggingFace MoE models
+  - pip install, one line to attach, immediate output
+  - Live routing diagnostics from actual forward pass decisions
+  - Honest about scope — single GPU in v0.1, community-extended beyond
+  - PyTorch-native, Linux/CUDA-first, Colab-validated
+
+What moewatch is NOT:
+  - Another WandB / TensorBoard wrapper
+  - A replacement for LibMoE or DeepSpeed
+  - A new MoE architecture or trainer
+  - An enterprise 100+ GPU monitoring platform
+  - An Apple MLX or non-PyTorch tool
+
+
+======================================================================
+2. PROBLEM STATEMENT
+======================================================================
+
+2.1 The Core Failure Modes
+--------------------------
+MoE training is fundamentally fragile in ways that dense model training
+is not. Four specific failure modes exist that current tooling does not
+surface early enough:
+
+  Expert Collapse
+    When Discovered Today: After full training run
+    Cost: Days of GPU time wasted
+
+  Low Routing Entropy
+    When Discovered Today: Manual log analysis post-run
+    Cost: Suboptimal model, rerun needed
+
+  Dead Experts
+    When Discovered Today: Inference evaluation only
+    Cost: Model capacity permanently wasted
+
+  Unstable Router
+    When Discovered Today: Loss curve inspection after the fact
+    Cost: Hours of debugging with no clear signal
+
+
+2.2 The Confirmed Tooling Gap
+------------------------------
+After thorough competitive research across five distinct tools and
+libraries, the following gap has been confirmed as real, unoccupied,
+and precisely bounded:
+
+  chuk-lazarus
+    Backend: Apple MLX only
+    MoE Diagnostics: Yes, deep
+    Training-time: Partial
+    Linux/CUDA: No
+    Verdict: Eliminated — Apple Silicon only
+
+  MLXLMProbe
+    Backend: Apple MLX only
+    MoE Diagnostics: Yes
+    Training-time: No
+    Linux/CUDA: No
+    Verdict: Eliminated — Apple Silicon only
+
+  model-clinic
+    Backend: PyTorch
+    MoE Diagnostics: Surface only (static weights)
+    Training-time: Advisory/callback
+    Linux/CUDA: Yes
+    Verdict: Adjacent, not overlapping
+
+  LibMoE
+    Backend: Own framework
+    MoE Diagnostics: Deep
+    Training-time: Yes
+    Linux/CUDA: Yes
+    Verdict: Different category — full framework adoption required
+
+  MixtureKit
+    Backend: Own framework
+    MoE Diagnostics: Visualization
+    Training-time: No
+    Linux/CUDA: Yes
+    Verdict: Different category — framework adoption required
+
+  moewatch (this)
+    Backend: PyTorch
+    MoE Diagnostics: Deep — live forward pass
+    Training-time: Yes
+    Linux/CUDA: Yes
+    Verdict: Unoccupied — build it
+
+
+2.3 The model-clinic Distinction
+----------------------------------
+model-clinic (v0.4.2, May 2026) is the closest genuine adjacent tool
+and deserves honest acknowledgment. It is pip-installable,
+PyTorch-native, and includes moe_router_collapse as a named diagnostic
+condition. However, it performs static weight analysis on saved
+checkpoints — reading tensor statistics post-hoc — not live routing
+diagnostics during a forward pass. The distinction is fundamental:
+
+  model-clinic = blood test on a saved sample.
+  moewatch     = live heart monitor during the surgery.
+
+The README for moewatch will explicitly acknowledge model-clinic and
+explain this distinction. The design of its ClinicMonitor +
+ClinicTrainerCallback API pattern is worth studying as a reference.
+
+
+======================================================================
+3. THE IDEA
+======================================================================
+
+The idea emerged from a concrete observation: HuggingFace MoE
+researchers — training Mixtral, OLMoE, DeepSeek-MoE — discover expert
+collapse after the fact. The tooling ecosystem was designed for dense
+models and MoEs inherited it without the diagnostic layer they actually
+need.
+
+The analogy that crystallized the design: pytest does not rewrite your
+code. It attaches to it and surfaces failures. moewatch is pytest for
+MoE routing. Attach it. It tells you what is collapsing and when, with
+zero modifications to your model or trainer.
+
+3.1 Design Axioms
+------------------
+  - Non-invasive first. Zero weight modifications, zero training loop
+    changes.
+  - Attach-anywhere. If you loaded it from HuggingFace, moewatch should
+    work on it.
+  - Live diagnostics over post-hoc analysis. The value is catching
+    collapse at step 2000, not after the run.
+  - Honest scope. Single GPU first. No pretending to solve distributed
+    until community validates it.
+  - Actionable output. Not just metrics — suggestions the researcher
+    can act on immediately.
+
+
+======================================================================
+4. OBJECTIVES
+======================================================================
+
+4.1 Primary Objectives
+-----------------------
+  - Make MoE failure modes visible during training, not after.
+  - Provide zero-friction installation: pip install moewatch, then one
+    line to attach.
+  - Work with models researchers already use: Mixtral, DeepSeek-MoE,
+    OLMoE.
+  - Give actionable fix suggestions, not just metric dumps.
+  - Be honest about scope: single-GPU first, distributed later via
+    community.
+
+4.2 Secondary Objectives
+-------------------------
+  - Build community trust through a transparent, scoped v0.1 release.
+  - Establish a clear contribution surface for distributed and
+    multi-GPU support.
+  - Become the standard diagnostic companion for HuggingFace MoE
+    models.
+  - Acknowledge model-clinic honestly in README — explain what each
+    tool does differently.
+  - Integrate with WandB and TensorBoard based on user demand in v0.2+.
+
+4.3 Non-Objectives (Explicitly Out of Scope)
+---------------------------------------------
+  - Building a new MoE architecture.
+  - Replacing any existing training framework.
+  - Supporting 100+ GPU clusters in v0.1.
+  - Generating automatic model fixes (diagnosis only in v0.1).
+  - Supporting non-PyTorch backends in v0.1 (Apple MLX, JAX, etc.).
+  - Competing with model-clinic on static weight analysis — they do
+    that well.
+
+
+======================================================================
+5. SCOPE
+======================================================================
+
+5.1 Version Scope
+------------------
+  v0.1  Single GPU, Mixtral + OLMoE, 4 core diagnostics, CLI report
+        Target: 3 weeks
+
+  v0.2  DeepSeek-MoE, WandB/TensorBoard integration, training-time
+        hooks  Target: 3 weeks post v0.1
+
+  v0.3  Community multi-GPU (DDP/FSDP), expert specialization analysis
+        Target: Community-driven
+
+  v1.0  Stable API, full HF MoE coverage, recommendations engine
+        Target: Post community adoption
+
+
+5.2 Hardware Scope
+-------------------
+v0.1 Supported:
+  - CPU — fully supported (synthetic MoE, testing, development)
+  - Single GPU (T4, A100, H100, consumer cards) — fully supported
+  - Google Colab free tier (T4) — explicitly validated and documented
+  - Kaggle free tier (2x T4) — single-GPU mode supported
+
+v0.1 Not Supported (Documented Honestly):
+  - Multi-GPU DDP / FSDP — community contribution welcome
+  - TPUs — not in scope
+  - 100+ GPU clusters — not in scope for v0.1
+  - Apple Silicon / MLX — not the target; chuk-lazarus covers that
+    space
+
+
+5.3 Model Scope
+----------------
+  Mixtral 8x7B / 8x22B   v0.1: Yes (Primary)   v0.2: Yes
+    Notes: First-class support, all features
+
+  OLMoE-1B-7B            v0.1: Yes (Primary)   v0.2: Yes
+    Notes: Lightweight, free-tier testable
+
+  DeepSeek-MoE           v0.1: No              v0.2: Yes
+    Notes: Architecture differences need mapping
+
+  Qwen MoE               v0.1: No              v0.2: Yes
+    Notes: Community interest driven
+
+  Custom HF MoE          v0.1: Best-effort     v0.2: Yes
+    Notes: Requires standard router pattern
+
+
+======================================================================
+6. ARCHITECTURE OVERVIEW
+======================================================================
+
+moewatch uses PyTorch forward hooks to intercept router outputs
+non-invasively. It never modifies model weights or training logic. The
+library is structured in four layers:
+
+  Hook Engine
+    Responsibility: Attaches / detaches forward hooks on router modules
+    Key Classes: HookManager, RouterHook
+
+  Collector
+    Responsibility: Aggregates per-step routing statistics
+    asynchronously
+    Key Classes: StatCollector, RingBuffer
+
+  Analyzer
+    Responsibility: Computes metrics — entropy, utilization, collapse
+    score
+    Key Classes: EntropyAnalyzer, CollapseDetector
+
+  Reporter
+    Responsibility: Formats and outputs reports, warnings, suggestions
+    Key Classes: AuditReport, CLIReporter
+
+
+6.1 Core Design Principles
+---------------------------
+  - Non-invasive: zero modifications to model parameters or training
+    loop.
+  - Asynchronous collection: hooks write to a ring buffer; analysis
+    runs off the critical path.
+  - Sampling-based: configurable step interval to keep overhead under
+    2%.
+  - Graceful degradation: if architecture is unrecognized, warn and
+    no-op rather than crash.
+  - Single source of truth: all metrics derive from raw routing logits,
+    not post-hoc logs.
+
+
+6.2 Zero-Overhead Guarantee
+-----------------------------
+moewatch guarantees <2% training throughput overhead in default
+configuration. Achieved via:
+  - Sampling every N steps (default N=10)
+  - Async CUDA reads
+  - CPU-side statistics
+  - Fixed-memory ring buffer
+
+
+======================================================================
+7. CORE FEATURES
+======================================================================
+
+Feature 1 — Dead Expert Detection
+-----------------------------------
+  from moewatch import audit
+
+  report = audit(model, dataloader)
+  report.dead_experts()
+
+  # Output:
+  # [DEAD] Expert 7   utilization: 0.01%
+  # [DEAD] Expert 12  utilization: 0.00%
+  # [OK]   Expert 3   utilization: 12.4%
+
+  - Threshold: configurable, default 0.1% selection rate.
+  - Window: rolling N-step window, not cumulative average.
+  - Per-layer reporting: dead experts reported per MoE layer, not
+    globally.
+  - Cold vs dead: warns early for 'cold' experts that may recover;
+    errors for confirmed dead.
+
+
+Feature 2 — Routing Entropy Analysis
+--------------------------------------
+  report.routing_entropy()
+
+  # Layer 0  entropy: 2.94  [HEALTHY]
+  # Layer 1  entropy: 1.82  [LOW]     WARN
+  # Layer 3  entropy: 0.21  [CRITICAL] ERROR
+
+  Routing entropy measures how evenly the router distributes tokens
+  across experts. Low entropy means the router is concentrating on a
+  few experts even if none are technically dead. This is the metric
+  most absent from standard training setups.
+
+  - Metric: Shannon entropy of the expert selection distribution per
+    layer.
+  - Baselines: compares against theoretical maximum entropy (uniform
+    distribution).
+  - Trend tracking: plots entropy over training steps to detect gradual
+    collapse.
+  - Layer-wise: separate entropy scores per MoE layer, not a single
+    global score.
+  - Alerts: configurable thresholds for warning and critical levels.
+
+
+Feature 3 — Expert Utilization Histogram
+------------------------------------------
+  report.utilization()
+
+  # Expert  0  ||||||||||||  12.3%
+  # Expert  1  ||||||||||||||  14.1%
+  # Expert  7  |  0.01%   WARN COLD
+  # Expert 12     0.00%   ERROR DEAD
+
+  - Output: ASCII histogram in terminal; JSON-exportable data for
+    pipelines.
+  - Normalization: percentages relative to total tokens processed in
+    window.
+  - Color coding: green (healthy), amber (cold/low), red
+    (dead/critical).
+  - Comparison mode: side-by-side histograms across training
+    checkpoints.
+
+
+Feature 4 — Training-Time Live Alerts
+---------------------------------------
+  from moewatch import MoEWatch
+
+  watcher = MoEWatch(model)
+  watcher.attach(trainer)   # works with HuggingFace Trainer
+
+  # [Step 1000] OK   All experts active, entropy: 2.81
+  # [Step 2000] WARN Expert 11 cold  (util: 0.3%)
+  # [Step 3000] ERR  Expert 11 DEAD. Entropy drop 45%.
+  # [Step 3000] TIP  Suggestion: raise aux_loss_coef to 0.04
+
+  - Trainer integration: HuggingFace Trainer callbacks (TrainerCallback
+    interface).
+  - Standalone mode: step-based hooks for custom training loops.
+  - Alert levels: INFO (normal), WARN (degrading), ERROR (critical
+    collapse).
+  - Configurable frequency: default every 100 steps, configurable.
+  - Silent mode: structured JSON output for integration with existing
+    logging.
+
+
+======================================================================
+8. DIAGNOSTIC API REFERENCE
+======================================================================
+
+8.1 audit() — Primary API
+---------------------------
+  from moewatch import audit
+
+  report = audit(
+      model,           # any HuggingFace MoE model
+      dataloader,      # optional: sample batches
+      steps=50,        # how many batches to sample
+  )
+
+  report.summary()          # full human-readable report
+  report.dead_experts()     # list of dead/cold experts
+  report.routing_entropy()  # per-layer entropy scores
+  report.utilization()      # per-expert token %
+  report.recommendations()  # fix suggestions (v0.2)
+  report.to_json()          # machine-readable export
+
+
+8.2 MoEWatch — Training-Time Monitor
+--------------------------------------
+  from moewatch import MoEWatch, WatchConfig
+
+  config = WatchConfig(
+      dead_threshold=0.001,   # 0.1% default
+      entropy_warn=0.6,       # 60% of max
+      entropy_critical=0.4,   # 40% of max
+      window_steps=500,       # rolling window
+      sample_every=10,        # overhead control
+      log_every=100,          # alert frequency
+      output='console',       # or 'json'
+  )
+
+  watcher = MoEWatch(model, config=config)
+  watcher.attach(trainer)
+  watcher.detach()            # clean removal when done
+
+
+8.3 Auto-Detection of Router Layers
+-------------------------------------
+A key engineering challenge: different MoE architectures structure
+their router modules differently. moewatch implements a two-pass
+auto-detection strategy:
+
+  - Named module scan: walks model.named_modules() for known patterns
+    (MixtralSparseMoeBlock, OlmoeMoE, etc.)
+  - Heuristic fallback: identifies modules with 'router', 'gate', or
+    'sparse' in class name.
+  - Manual override: user can specify
+    router_modules=['model.layers.0.block_sparse_moe'] explicitly.
+  - Graceful failure: if nothing detected, emits a clear warning and
+    returns a no-op watcher rather than crashing.
+
+
+======================================================================
+9. METRICS REFERENCE
+======================================================================
+
+Expert Utilization
+  Formula: tokens_to_expert_i / total_tokens
+  Healthy Range: > 1% per expert
+  Alert Threshold: < 0.1% = dead
+
+Routing Entropy
+  Formula: H = -sum( p_i * log(p_i) )
+  Healthy Range: > 80% of max entropy
+  Alert Threshold: < 50% = critical
+
+Load Imbalance Score
+  Formula: max_util / mean_util
+  Healthy Range: < 3x
+  Alert Threshold: > 5x = alert
+
+Entropy Trend
+  Formula: delta H over last 500 steps
+  Healthy Range: Stable or increasing
+  Alert Threshold: Drop > 20% = warn
+
+Cold Expert Duration
+  Formula: Steps since last selection
+  Healthy Range: < 200 steps cold
+  Alert Threshold: > 500 steps = dead
+
+All thresholds are configurable via WatchConfig. Defaults are derived
+from empirical observations in the MoE training literature: Switch
+Transformer, Mixtral, and DeepSeek-MoE papers.
+
+
+======================================================================
+10. AREAS COVERED
+======================================================================
+
+10.1 MoE Training Diagnostics
+-------------------------------
+  - Expert collapse detection (dead and cold experts).
+  - Router entropy tracking over training time.
+  - Load balance quality measurement.
+  - Training instability early warning.
+  - Auxiliary loss effectiveness assessment.
+
+
+10.2 Model Compatibility Layer
+--------------------------------
+  - HuggingFace Transformers MoE model auto-detection.
+  - Router module identification across architectures.
+  - Custom model support via manual configuration.
+  - Hook attachment and detachment lifecycle management.
+
+
+10.3 Reporting and Output
+--------------------------
+  - Terminal-friendly colored ASCII reports.
+  - JSON export for integration with existing tooling.
+  - Per-layer and per-expert granularity.
+  - Historical trend data with configurable retention window.
+
+
+10.4 Developer Experience
+--------------------------
+  - Single-line API: audit(model) returns full report.
+  - Zero configuration required for standard HuggingFace models.
+  - Clean error messages when architecture unrecognized.
+  - Colab and Kaggle free tier explicitly documented and tested.
+
+
+10.5 Areas Intentionally NOT Covered in v0.1
+---------------------------------------------
+  Expert specialization analysis (what each expert learned)
+    Reason / Target Version: v0.2
+
+  Automatic model patching or weight modification
+    Reason / Target Version: Never planned
+
+  Multi-GPU distributed aggregation (DDP / FSDP)
+    Reason / Target Version: v0.3, community contribution
+
+  TensorBoard / WandB integration
+    Reason / Target Version: v0.2 based on user demand
+
+  Router architecture recommendations
+    Reason / Target Version: v1.0
+
+  Static weight analysis of saved checkpoints
+    Reason / Target Version: model-clinic already does this well
+
+
+======================================================================
+11. KNOWN LIMITATIONS
+======================================================================
+
+11.1 v0.1 Limitations (Honest)
+--------------------------------
+  Single GPU only
+    Impact: No distributed training support
+    Mitigation / Roadmap: v0.3 community contribution surface
+
+  Heuristic router detection
+    Impact: May miss custom MoE architectures
+    Mitigation / Roadmap: Manual override config provided
+
+  No weight-level analysis
+    Impact: Cannot diagnose checkpoint quality statically
+    Mitigation / Roadmap: model-clinic recommended for that use case
+
+  No WandB / TensorBoard integration
+    Impact: Requires separate logging setup
+    Mitigation / Roadmap: v0.2 based on demand
+
+  Python 3.8+ required
+    Impact: Older environments not supported
+    Mitigation / Roadmap: Documented clearly
+
+  No automatic fix application
+    Impact: Diagnosis only; fixes are manual
+    Mitigation / Roadmap: Suggestions engine in v0.2
+
+  Router pattern coverage
+    Impact: DeepSeek-MoE not in v0.1
+    Mitigation / Roadmap: v0.2 explicit target
+
+
+11.2 Architectural Decisions with Trade-offs
+---------------------------------------------
+  - Ring buffer design caps memory footprint but loses older step data
+    if buffer is too small.
+  - Sampling every N steps misses intra-interval collapses — acceptable
+    at default N=10.
+  - CPU-side statistics computation avoids GPU overhead but adds
+    host-device transfer latency.
+  - Hook-based approach is model-agnostic but requires router output to
+    be accessible as a tensor.
+
+
+======================================================================
+12. FUNCTIONS & CLASSES REFERENCE
+======================================================================
+
+  audit(model, dataloader, steps)
+    Module: moewatch
+    Description: Run full diagnostic pass. Returns AuditReport.
+
+  MoEWatch(model, config)
+    Module: moewatch
+    Description: Training-time monitor. Attach to HF Trainer.
+
+  WatchConfig(**kwargs)
+    Module: moewatch.config
+    Description: Configuration dataclass for all thresholds.
+
+  HookManager
+    Module: moewatch.hooks
+    Description: Manages attach/detach lifecycle for all router hooks.
+
+  RouterHook
+    Module: moewatch.hooks
+    Description: Forward hook capturing routing logits per step.
+
+  StatCollector
+    Module: moewatch.collector
+    Description: Asynchronous aggregation of routing statistics.
+
+  RingBuffer
+    Module: moewatch.collector
+    Description: Fixed-memory circular buffer for step data.
+
+  EntropyAnalyzer
+    Module: moewatch.analyzer
+    Description: Computes Shannon entropy per layer per step.
+
+  CollapseDetector
+    Module: moewatch.analyzer
+    Description: Dead/cold expert identification logic.
+
+  AuditReport
+    Module: moewatch.report
+    Description: Structured report object with all diagnostic methods.
+
+  CLIReporter
+    Module: moewatch.report
+    Description: Terminal ASCII formatter for human-readable output.
+
+  report.summary()
+    Module: AuditReport
+    Description: Full human-readable diagnostic summary.
+
+  report.dead_experts()
+    Module: AuditReport
+    Description: Returns list of dead and cold experts per layer.
+
+  report.routing_entropy()
+    Module: AuditReport
+    Description: Per-layer entropy scores and trend.
+
+  report.utilization()
+    Module: AuditReport
+    Description: Per-expert token distribution histogram.
+
+  report.recommendations()
+    Module: AuditReport
+    Description: Actionable fix suggestions (v0.2).
+
+  report.to_json()
+    Module: AuditReport
+    Description: Machine-readable JSON export.
+
+
+======================================================================
+13. COMPETITIVE POSITIONING (POST-RESEARCH)
+======================================================================
+
+  LibMoE (TMLR 2024)
+    What It Does: Full MoE research framework with routing diagnostics
+    and regime-level analysis
+    What moewatch Adds: No framework adoption required
+
+  model-clinic (v0.4.2)
+    What It Does: Static weight analysis, 20+ conditions including
+    moe_router_collapse detection
+    What moewatch Adds: Live forward pass diagnostics, not checkpoint
+    inspection
+
+  chuk-lazarus (MLX)
+    What It Does: MoEHooks with get_expert_utilization() and
+    get_router_entropy() — Apple Silicon only
+    What moewatch Adds: Identical goal, Linux/CUDA/PyTorch-native
+
+  MLXLMProbe (MLX)
+    What It Does: Router diagnostics on Apple Silicon, GPT-OSS only,
+    macOS 15+ required
+    What moewatch Adds: Same diagnostics for every HF MoE on any
+    Linux/GPU
+
+  WandB / TensorBoard
+    What It Does: General training metric logging, no MoE-specific
+    diagnostics
+    What moewatch Adds: MoE-specific layer on top, complementary
+
+  Custom scripts
+    What It Does: Researcher one-off analysis code, not reusable,
+    rediscovered per project
+    What moewatch Adds: Reusable, maintained, pip-installable
+
+Single-sentence positioning:
+  moewatch is the only tool that lets you audit any existing
+  HuggingFace MoE model with one pip install and one line of code —
+  on any Linux/GPU environment, with live training-time diagnostics.
+
+
+======================================================================
+14. DEVELOPMENT ROADMAP
+======================================================================
+
+  Phase 1: Core  (Week 1)
+    Deliverable: Hook engine + StatCollector on synthetic MoE
+    Validation Env: Laptop CPU
+
+  Phase 2: Metrics  (Week 2)
+    Deliverable: Entropy + utilization + dead expert detection
+    Validation Env: Laptop CPU
+
+  Phase 3: Real Model  (Week 3)
+    Deliverable: Attach to OLMoE-1B on Colab T4, fix edge cases
+    Validation Env: Kaggle / Colab
+
+  Phase 4: Polish  (Week 4)
+    Deliverable: Clean API, README, Colab demo notebook, PyPI publish
+    Validation Env: Colab free tier
+
+  Phase 5: Mixtral  (Week 5)
+    Deliverable: Extend auto-detection to Mixtral 8x7B
+    Validation Env: Kaggle T4
+
+  Phase 6: Community  (Ongoing)
+    Deliverable: DeepSeek support, WandB, multi-GPU via PRs
+    Validation Env: User hardware
+
+
+14.1 v0.1 Ship Criteria (Non-Negotiable)
+-----------------------------------------
+  - pip install moewatch works in a fresh Colab environment
+  - audit(model) works on OLMoE-1B-7B without configuration
+  - Dead expert detection produces correct output on a synthetic
+    collapsed model
+  - README is honest about single-GPU scope and acknowledges
+    model-clinic
+  - One public Colab demo notebook with real output
+
+
+======================================================================
+15. SOLUTION SUMMARY
+======================================================================
+
+moewatch solves a confirmed, unoccupied gap in the MoE training
+tooling ecosystem. The solution is precisely scoped, honestly
+positioned, and designed to be composable with — not competitive
+with — the tools that already exist.
+
+  Expert collapse discovered after full training run
+    Solution: Live dead expert detection during training, every 100
+    steps
+
+  Routing entropy not surfaced by standard logging
+    Solution: Shannon entropy per layer, per step, with trend alerts
+
+  No pip-installable tool for existing HF MoE models
+    Solution: pip install moewatch + one line to attach
+
+  Static-only tools (model-clinic) miss live dynamics
+    Solution: Forward-pass hooks, not checkpoint weight inspection
+
+  MLX tools exist but exclude Linux/CUDA researchers
+    Solution: PyTorch-native, Linux-first, Colab-validated
+
+  Researchers write one-off analysis scripts per project
+    Solution: Maintained, reusable library with community surface
+
+
+----------------------------------------------------------------------
+moewatch
+Built for the researcher who doesn't have 10 GPUs but still needs
+to know if their MoE is collapsing.
+----------------------------------------------------------------------

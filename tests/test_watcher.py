@@ -462,3 +462,221 @@ class TestWatchReport:
                 moe_model(x)
             report = watch.step(77)
             assert report.step == 77
+
+# ===========================================================================
+# ── Additional _watcher.py coverage tests ──────────────────────────────────
+# ===========================================================================
+
+from unittest.mock import MagicMock
+
+from moewatch.config import OutputMode
+from moewatch.policy.bandit_policy import BanditPolicy
+
+
+def test_get_intervention_history_no_engine(moe_model):
+    watch = MoEWatch(moe_model, _silent_config())
+
+    watch.intervention_engine = None
+
+    assert watch._get_intervention_history("layer0") == []
+
+
+def test_get_intervention_history(moe_model):
+    watch = MoEWatch(moe_model, _silent_config())
+
+    watch.intervention_engine = MagicMock()
+    watch.intervention_engine._intervention_log = [
+        {"layer_name": "layer0", "action_type": "rebalance"},
+        {"layer_name": "layer1", "action_type": "freeze"},
+        {"layer_name": "layer0", "action_type": "reroute"},
+    ]
+
+    history = watch._get_intervention_history("layer0")
+
+    assert history == ["rebalance", "reroute"]
+
+
+def test_bandit_policy_initialization(moe_model):
+    cfg = _silent_config()
+    cfg.intervention_enabled = True
+    cfg.policy_type = "bandit"
+
+    watch = MoEWatch(moe_model, cfg)
+
+    watch._trainer = MagicMock()
+    watch._init_intervention_system()
+
+    assert isinstance(watch.policy, BanditPolicy)
+
+
+def test_get_risk_summary_with_scores(moe_model):
+    watch = MoEWatch(moe_model, _silent_config())
+
+    watch._layer_order = ["layer0"]
+
+    watch.risk_fuser = MagicMock()
+
+    score = MagicMock()
+    score.risk_score = 0.91
+
+    watch.risk_fuser.get_latest_score.return_value = score
+
+    result = watch.get_risk_summary()
+
+    assert result["layer0"] == 0.91
+
+
+def test_emit_report_cli_branch(moe_model):
+    watch = MoEWatch(moe_model, _silent_config())
+
+    watch._cli_reporter = MagicMock()
+    watch.config.output = OutputMode.CLI
+
+    watch._emit_report(
+        global_step=1,
+        current_loss=0.5,
+        risk_scores={},
+        watch_report=MagicMock(),
+        interventions=[],
+        alerts=[],
+    )
+
+    watch._cli_reporter.render_dashboard.assert_called_once()
+
+
+def test_emit_report_json_branch(moe_model):
+    watch = MoEWatch(moe_model, _silent_config())
+
+    watch._json_reporter = MagicMock()
+    watch.config.output = OutputMode.JSON
+
+    watch._emit_report(
+        global_step=1,
+        current_loss=0.5,
+        risk_scores={},
+        watch_report=MagicMock(),
+        interventions=[],
+        alerts=[],
+    )
+
+    watch._json_reporter.write_step.assert_called_once()
+
+
+def test_callback_returns_when_not_running(moe_model):
+    watch = MoEWatch(moe_model, _silent_config())
+
+    cb = MoEWatchCallback(watch)
+
+    state = MagicMock()
+    state.global_step = 10
+    state.log_history = []
+
+    cb.on_step_end(
+        args=MagicMock(),
+        state=state,
+        control=MagicMock(),
+    )
+
+    assert watch._global_step == 0
+
+
+def test_callback_on_train_end_stops_watch(moe_model):
+    watch = MoEWatch(moe_model, _silent_config())
+    watch.start()
+
+    cb = MoEWatchCallback(watch)
+
+    cb.on_train_end(
+        args=MagicMock(),
+        state=MagicMock(),
+        control=MagicMock(),
+    )
+
+    assert watch.is_running is False
+
+
+def test_callback_handles_step_exception(moe_model):
+    from unittest.mock import patch
+
+    watch = MoEWatch(moe_model, _silent_config())
+    watch.start()
+
+    cb = MoEWatchCallback(watch)
+
+    state = MagicMock()
+    state.global_step = 42
+    state.log_history = []
+
+    with patch.object(
+        watch,
+        "step",
+        side_effect=RuntimeError("boom"),
+    ):
+        cb.on_step_end(
+            args=MagicMock(),
+            state=state,
+            control=MagicMock(),
+        )
+
+    watch.stop()
+
+
+def test_get_risk_summary_empty_before_analysis(moe_model):
+    watch = MoEWatch(moe_model, _silent_config())
+
+    assert watch.get_risk_summary() == {}
+
+
+def test_is_running_property(moe_model):
+    watch = MoEWatch(moe_model, _silent_config())
+
+    assert watch.is_running is False
+
+    watch.start()
+
+    assert watch.is_running is True
+
+    watch.stop()
+
+
+def test_num_layers_monitored_property(moe_model):
+    watch = MoEWatch(moe_model, _silent_config())
+
+    watch.start()
+
+    assert watch.num_layers_monitored > 0
+
+    watch.stop()
+
+
+def test_repr_contains_expected_fields(moe_model):
+    watch = MoEWatch(moe_model, _silent_config())
+
+    text = repr(watch)
+
+    assert "MoEWatch(" in text
+    assert "running=" in text
+    assert "alerts=" in text
+
+
+def test_get_alerts_filter_when_no_alerts(moe_model):
+    watch = MoEWatch(moe_model, _silent_config())
+
+    assert watch.get_alerts(since_step=999) == []
+
+
+def test_stop_handles_detach_exception(moe_model):
+    from unittest.mock import patch
+
+    watch = MoEWatch(moe_model, _silent_config())
+
+    watch.start()
+
+    with patch.object(
+        watch.hook_manager,
+        "detach",
+        side_effect=RuntimeError("detach failed"),
+    ):
+        watch.stop()
+
+    assert watch.is_running is False

@@ -1,0 +1,273 @@
+```
+╔═══════════════════════════════════════════════════════════════════════════╗
+║                  MOEWATCH — FINAL LOCKED SPECIFICATION                    ║
+╚═══════════════════════════════════════════════════════════════════════════╝
+
+Library : MoEWatch
+Version : v0.2.0
+License : Apache 0.2.0
+GitHub  : https://github.com/Abineshabee/MoEWatch.git
+Author  : Abinesh N
+GitHub Handler : Abineshabee
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PROBLEM
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+MoE routing collapse is inevitable, silent, and always detected too late.
+Every existing tool measures collapse AFTER experts die.
+No system predicts it. No system intervenes. No system learns from outcomes.
+
+  ROOT CAUSE
+    Softmax gating + gradient feedback = self-reinforcing loop
+    Popular experts → more updates → more popular → others die
+    Prevention methods reduce collapse but cannot eliminate it
+
+  THE GAP
+    Not a better prevention method
+    A predictive control system that catches what prevention methods miss
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SOLUTION OVERVIEW : MoEWatch(v0.1.0) -> MoEWatch(v0.2.0)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+MoEWatch is a predictive observability and adaptive control system
+for MoE training with seven tightly coupled components:
+
+  OBSERVE   →  three-tier empirically ordered precursor signal hierarchy
+  PREDICT   →  per-layer collapse risk score (weighted signal fusion)
+  ATTRIBUTE →  intervention-conditioned counterfactual baseline
+  PROPOSE   →  candidate intervention set with safety constraints
+  SELECT    →  contextual bandit policy with delayed reward model
+  APPLY     →  live targeted intervention on running training
+  LEARN     →  policy updates from discounted counterfactual reward
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 1 — OBSERVE: Empirically Ordered Precursor Signal Hierarchy
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Signals are NOT parallel features. They have an empirically ordered
+  hierarchy — earlier, confirmatory, and localizing roles respectively.
+
+  NOTE: We call this "empirically ordered" not "causal" — the ordering
+  is validated by lead-time measurements, not assumed from theory.
+  This avoids over-claiming causality. Reviewers cannot attack this.
+
+  TIER 1 — Earliest Consistent Predictor     (50-200 steps before collapse)
+    Gradient Starvation
+    Experts stop receiving useful gradients before utilization drops
+    This is the PRIMARY signal — earliest and most actionable
+    Detected via: backward hooks on expert weight layers
+    Metric: per-expert gradient norm over rolling window
+    Hook type: register_full_backward_hook (zero weight modification)
+
+  TIER 2 — Intermediate Predictive Confirmation  (30-100 steps before)
+    Entropy Drift
+    Router distribution narrows as gradient starvation takes effect
+    CONFIRMS Tier 1 — raises confidence in risk score
+    Detected via: CUSUM detector on per-layer entropy history
+    Metric: entropy_norm trajectory slope per layer
+    Already implemented in MoEWatch — needs CUSUM upgrade only
+
+  TIER 3 — Localization Signal               (system-level spread warning)
+    Cross-Layer Correlation
+    Collapse spreads from source layer to neighbors predictably
+    LOCALIZES spread — identifies source layer vs downstream victims
+    Detected via: inter-layer entropy correlation matrix over time
+    Metric: correlation coefficient between layer entropy sequences
+
+  RISK SCORE OUTPUT
+    risk_score = w1*gradient_signal + w2*entropy_signal + w3*spread_signal
+    where w1 > w2 > w3  (Tier 1 weighted highest, empirically validated)
+    range: 0.0 (healthy) → 1.0 (imminent collapse)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 2 — ATTRIBUTE: Intervention-Conditioned Counterfactual Baseline
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  THE PROBLEM
+    MoE training has delayed feedback, multi-factor drift, overlapping
+    interventions. Naive reward assignment is corrupted:
+      outcome_change ≠ effect_of_last_intervention
+
+  THE SOLUTION — Intervention-Conditioned Counterfactual Baseline
+    For each layer, maintain a rolling baseline trajectory computed
+    ONLY from history that excludes post-intervention steps.
+
+    baseline(t) = f(history_without_recent_interventions)
+
+    ΔH_real          = H_after - H_before           (naive, wrong)
+    ΔH_counterfactual = H_after - H_baseline(t)     (correct)
+
+  CONTAMINATION PREVENTION (critical upgrade)
+    After any intervention on layer L:
+      Mark steps t → t+cooldown as "intervention-influenced"
+      Exclude these steps from baseline regression window
+      Reset baseline window after cooldown period expires
+    This prevents past interventions from contaminating future baselines
+    — the "baseline illusion" problem that reviewers will look for
+
+  HOW BASELINE IS COMPUTED
+    Rolling linear regression on pre-intervention signal history
+    Projects forward N steps assuming no action taken
+    Minimum clean history required: configurable (default 20 steps)
+    If clean history insufficient: policy defaults to D (do nothing)
+
+  RESULT
+    Every intervention is credited against what would have happened
+    naturally — not against the noisy step-to-step signal
+    This is causal intervention effect estimation in a non-stationary
+    system. This is the most publishable component of MoEWatch.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 3 — PROPOSE: Candidate Interventions with Safety Constraints
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  For each at-risk layer, four candidate actions:
+
+    A. Increase aux_loss_coef       soft load balancing pressure
+    B. Inject router noise          force exploration, break feedback loop
+    C. Increase expert dropout      prevent over-reliance on popular experts
+    D. Do nothing, monitor          conservative baseline action
+
+  SAFETY CONSTRAINTS (non-negotiable on all interventions)
+    Maximum delta per step: capped to prevent sudden destabilization
+    Cooldown period: minimum N steps between interventions per layer
+    Neighbor check: verify layers L-1 and L+1 stable before acting
+    Revert logic: if health degrades below baseline after window → undo
+    Loss guard: if training loss spikes > threshold → freeze all actions
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 4 — SELECT: Contextual Bandit with Delayed Reward Model
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  NOT a rule system. A learning policy with two implementation phases.
+
+  STATE  = (risk_score, layer_id, training_step, intervention_history)
+  ACTION = one of {A, B, C, D}
+  REWARD = discounted counterfactual-corrected health improvement
+
+  DELAYED REWARD MODEL (critical addition)
+    Interventions do not show effect immediately.
+    Noise injection may look bad at t+1 but stabilize routing by t+50.
+    Naive immediate reward biases policy against correct actions.
+
+    reward = Σ ΔH_counterfactual(t+k) * γ^k   for k = 1 to K
+    where γ = discount factor (default 0.95)
+          K = observation window length (default 50 steps)
+
+    This is exponentially discounted reward over the observation window.
+    Captures delayed stabilization effects without full RL complexity.
+
+  PHASE 1 — Rule-Based Bootstrap     (implement first, safe, explainable)
+    risk < 0.3  → D (do nothing)
+    risk < 0.6  → A (increase aux loss, softest)
+    risk < 0.8  → B (inject noise)
+    risk ≥ 0.8  → C (expert dropout, strongest)
+    Ships first. Establishes behavioral baseline for Phase 2 comparison.
+
+  PHASE 2 — Contextual Bandit        (stretch goal, research contribution)
+    epsilon-greedy or Thompson Sampling over {A, B, C, D}
+    State vector fed into simple tabular or linear policy
+    Reward: discounted counterfactual ΔH over observation window
+    Policy updates after each complete observation window
+    Upgrades MoEWatch from heuristic tool → learning controller
+
+  WHY BANDIT NOT FULL RL
+    Full RL requires episode structure — training runs are too long
+    Bandit handles per-decision learning without episode boundaries
+    Simpler, more explainable, equally effective for this problem
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 5 — APPLY + MEASURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Apply selected intervention to live training
+  Mark intervention window as influenced (exclude from future baselines)
+  Wait observation window (default 50 steps)
+  Re-measure all three tier signals on affected layer and neighbors
+  Compute discounted counterfactual reward against clean baseline
+
+  IF reward positive  → policy reinforced, outcome logged
+  IF reward neutral   → no credit assigned, monitor continues
+  IF reward negative  → revert intervention, log failure, policy penalized
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 6 — LEARN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Policy memory records: state → action → discounted counterfactual reward
+  Policy improves within a single training run
+  Checkpoint saved and transferable to same model family
+  Over time learns: which interventions work at which training stages
+  and which layers are structurally fragile vs stable
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+EVALUATION PROTOCOL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  METRIC 1 — Lead-Time Advantage     (proves prediction is early)
+    T_moewatch    = step at which MoEWatch fires collapse warning
+    T_utilization = step at which utilization drop becomes visible
+    T_entropy     = step at which entropy threshold is crossed
+
+    Lead time = T_utilization - T_moewatch
+    Must be positive and consistent across model families
+
+    Baselines to beat:
+      Entropy threshold baseline    (existing in MoEWatch)
+      Load imbalance baseline       (standard monitoring)
+      Aux loss trigger baseline     (best existing heuristic)
+
+  METRIC 2 — Intervention Efficiency Score    (proves interventions are worth it)
+    IES = improvement_in_routing_stability / intervention_cost
+
+    Where stability improvement = reduction in dead expert rate
+    Where cost includes:
+      training instability introduced (loss spike magnitude)
+      compute overhead (profiled via torch.profiler)
+      deviation from baseline loss trajectory
+
+    Without IES: reviewers ask "you improved stability but at what cost?"
+    With IES: system is balanced and the tradeoff is explicit and defensible
+
+  EXPERIMENT DESIGN
+    Train small MoE (4-8 experts, 6-12 layers) on Wikitext-103
+    Let collapse happen naturally with no prevention (control condition)
+    Run MoEWatch alongside all baselines simultaneously
+    Record T and IES for all methods
+    Show MoEWatch fires first and IES > 1.0 consistently
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+KNOWN RISKS AND MITIGATIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  RISK 1 — Live intervention destabilizes training
+    Mitigation: conservative thresholds, cooldown, loss guard, revert logic
+
+  RISK 2 — Backward hooks add unacceptable overhead
+    Mitigation: gradient sampling not every step, rank-0 only, profiling
+
+  RISK 3 — Contaminated counterfactuals corrupt policy
+    Mitigation: intervention-conditioned baseline with exclusion windows
+
+  RISK 4 — Delayed reward misleads short-window evaluation
+    Mitigation: discounted reward window, configurable K and gamma
+
+  RISK 5 — Scope creep kills completion
+    Mitigation: Phase 1 rule-based ships first, bandit is stretch goal
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FINAL CLAIM
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+MoEWatch is the predictive observability and adaptive control system
+for MoE training. It detects routing collapse from an empirically ordered
+precursor hierarchy, estimates intervention effects via intervention-conditioned
+counterfactual baselines, selects corrective actions through a contextual
+bandit policy with discounted delayed rewards, and evaluates outcomes using
+lead-time advantage and intervention efficiency score.
+
+Prevention methods reduce collapse. MoEWatch catches what they miss.
+This specification is locked. Implementation begins now.
+```
