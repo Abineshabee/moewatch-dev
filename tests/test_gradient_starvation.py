@@ -332,9 +332,9 @@ class TestGradientStarvationRecovery:
         analyzer = GradientStarvationAnalyzer(strict_config)
         collector = StatCollector(strict_config)
 
-        # Phase 1: starve for 2 calls (below limit, but enough to set onset
+        # Phase 1: starve for 3 calls (below limit, but enough to set onset
         # once the rolling mean drops below threshold).
-        for step in range(2):
+        for step in range(3):
             collector.write_gradient_event(
                 make_gradient_event(
                     layer_name="layers.0.experts",

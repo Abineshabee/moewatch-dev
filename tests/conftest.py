@@ -332,12 +332,35 @@ def make_routing_event(
     if logits is None:
         if uniform:
             logits = torch.zeros(batch_size, n_experts)
+
+            selected = torch.empty(
+                batch_size,
+                min(2, n_experts),
+                dtype=torch.long,
+            )
+
+            for i in range(batch_size):
+                selected[i, 0] = i % n_experts
+
+                if n_experts > 1:
+                    selected[i, 1] = (i + 1) % n_experts
+
         else:
-            # Expert 0 receives 20x the signal — collapsed distribution
             logits = torch.zeros(batch_size, n_experts)
             logits[:, 0] = 20.0
 
-    top_k_vals, selected = torch.topk(logits, k=min(2, n_experts), dim=-1)
+            selected = torch.zeros(
+                batch_size,
+                2,
+                dtype=torch.long,
+            )
+
+    else:
+        _, selected = torch.topk(
+            logits,
+            k=min(2, n_experts),
+            dim=-1,
+        )
 
     return RoutingEvent(
         timestamp=time.time(),
