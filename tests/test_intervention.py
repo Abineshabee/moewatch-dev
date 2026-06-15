@@ -347,7 +347,7 @@ class TestInterventionEngineConstruction:
         bt = BaselineTracker(cfg)
         engine = InterventionEngine(cfg, trainer, bt)
         assert engine.config is cfg
-        assert engine.trainer is trainer
+        assert engine.model is trainer
         assert engine.baseline_tracker is bt
 
     def test_safety_guard_created(self) -> None:

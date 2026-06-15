@@ -1057,7 +1057,7 @@ class MoEWatch:
                 )
 
                 # Apply validated action (may be NoOp after safety downgrade)
-                if validated_action.action_type != "no_op":
+                if validated_action.action_type != "noop":
                     self.intervention_engine.apply_intervention(validated_action, step)
                     applied_interventions.append(validated_action)
                     # Mark baseline as intervention-influenced

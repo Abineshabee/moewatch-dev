@@ -779,10 +779,9 @@ class TestAuxLossAction:
     def test_apply_with_router_aux_loss_coef_attr(self) -> None:
         model = _FakeModelWithAuxCoef()
         model.config = _ConfigObj(router_aux_loss_coef=0.02)
-        trainer = _FakeTrainer(model)
 
         action = AuxLossAction(layer_name="layers.0.gate", delta=0.03)
-        action.apply(trainer)
+        action.apply(model)
         assert model.config.router_aux_loss_coef == pytest.approx(0.05)
 
     def test_apply_with_no_recognised_attr_is_noop(self) -> None:
@@ -826,10 +825,9 @@ class TestRouterNoiseAction:
 
     def test_apply_registers_hook_and_revert_removes_it(self) -> None:
         model = nn.Sequential(nn.Linear(4, 4))
-        trainer = _FakeTrainer(model)
 
         action = RouterNoiseAction(layer_name="0", noise_scale=0.1)
-        action.apply(trainer)
+        action.apply(model)
         assert action._hook_handle is not None
 
         # Run a forward pass to exercise the hook.
@@ -837,7 +835,7 @@ class TestRouterNoiseAction:
         out = model(x)
         assert out.shape == (2, 4)
 
-        action.revert(trainer)
+        action.revert(model)
         assert action._hook_handle is None
 
     def test_apply_idempotent_when_hook_already_registered(self) -> None:
@@ -897,29 +895,26 @@ class TestExpertDropoutAction:
 
     def test_apply_increases_dropout_and_revert_restores(self) -> None:
         model = nn.Sequential(nn.Dropout(p=0.1), nn.Linear(4, 4))
-        trainer = _FakeTrainer(model)
 
         action = ExpertDropoutAction(layer_name="0", dropout_delta=0.2)
-        action.apply(trainer)
+        action.apply(model)
         assert model[0].p == pytest.approx(0.3)
 
-        action.revert(trainer)
+        action.revert(model)
         assert model[0].p == pytest.approx(0.1)
 
     def test_apply_clamps_to_one(self) -> None:
         model = nn.Sequential(nn.Dropout(p=0.9))
-        trainer = _FakeTrainer(model)
 
         action = ExpertDropoutAction(layer_name="0", dropout_delta=0.5)
-        action.apply(trainer)
+        action.apply(model)
         assert model[0].p == pytest.approx(1.0)
 
     def test_apply_idempotent(self) -> None:
         model = nn.Sequential(nn.Dropout(p=0.1))
-        trainer = _FakeTrainer(model)
         action = ExpertDropoutAction(layer_name="0", dropout_delta=0.1)
-        action.apply(trainer)
-        action.apply(trainer)
+        action.apply(model)
+        action.apply(model)
         assert model[0].p == pytest.approx(0.2)
 
     def test_apply_with_no_dropout_submodules_is_noop(self) -> None:
