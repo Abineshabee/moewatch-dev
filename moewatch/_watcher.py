@@ -1031,6 +1031,10 @@ class MoEWatch:
 
         step_risk_scores = {ln: rr.risk_score for ln, rr in risk_reports.items()}
 
+        # Track action types that target a global config field and must
+        # only fire once per step regardless of how many layers trigger them.
+        _global_action_applied: set = set()
+
         for layer_name, risk_report in risk_reports.items():
             try:
                 # Build policy state
@@ -1061,6 +1065,14 @@ class MoEWatch:
 
                 # Apply validated action (may be NoOp after safety downgrade)
                 if validated_action.action_type != "noop":
+                    # aux_loss modifies a global model.config field — only
+                    # apply it once per step (for the highest-risk layer
+                    # that triggers it first in iteration order).
+                    if validated_action.action_type == "aux_loss":
+                        if "aux_loss" in _global_action_applied:
+                            policy_decisions[layer_name] = "noop"
+                            continue
+                        _global_action_applied.add("aux_loss")
                     self.intervention_engine.apply_intervention(validated_action, step)
                     applied_interventions.append(validated_action)
                     # Mark baseline as intervention-influenced
