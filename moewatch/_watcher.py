@@ -1034,17 +1034,20 @@ class MoEWatch:
         for layer_name, risk_report in risk_reports.items():
             try:
                 # Build policy state
+                layer_id = self._layer_order.index(layer_name) if layer_name in self._layer_order else 0
                 state = PolicyState(
                     risk_score=risk_report.risk_score,
-                    layer_id=layer_name,
+                    layer_id=layer_id,
                     training_step=step,
                     intervention_history=self._get_intervention_history(layer_name),
-                    entropy_norm=risk_report.tier2_contribution,
-                    gradient_norm_mean=risk_report.tier1_contribution,
+                    dominant_signal=risk_report.dominant_signal,
                 )
 
                 # Policy selects candidate action
                 action = self.policy.select_action(state)
+                # Patch layer_name to the real dotted module path so
+                # action.apply(model) can resolve get_submodule() correctly.
+                action.layer_name = layer_name
                 policy_decisions[layer_name] = action.action_type
 
                 # Safety validation and potential downgrade
