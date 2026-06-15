@@ -290,6 +290,7 @@ class MoEWatch:
         self.risk_fuser = None
         self.intervention_engine = None
         self.policy = None
+        self._intervention_gap_warned = False
         self._cli_reporter = None
         self._json_reporter = None
 
@@ -366,7 +367,9 @@ class MoEWatch:
             self.baseline_tracker.register_layer(layer_name)
 
         # ---- Construct intervention system (if enabled) ----
-        if self.config.intervention_enabled and self._trainer is not None:
+        # Interventions operate directly on self.model (a torch.nn.Module),
+        # so no HuggingFace Trainer is required to initialise this system.
+        if self.config.intervention_enabled:
             self._init_intervention_system()
 
         # ---- Reporters ----
@@ -471,6 +474,34 @@ class MoEWatch:
     # Core monitoring loop
     # ------------------------------------------------------------------
 
+    def pre_step(self, global_step: int) -> None:
+        """Inform MoEWatch of the upcoming training step number.
+
+        Call this *before* the forward pass (i.e. before ``model(x)``)
+        so that router/gradient hooks tag the events they capture during
+        that forward/backward pass with the correct ``global_step``.
+
+        Without this call (or if called only inside :meth:`step`, which
+        runs *after* the forward/backward pass), hook-captured events
+        default to ``global_step=0`` because the hooks' internal step
+        counter is never advanced before they fire.
+
+        Parameters
+        ----------
+        global_step : int
+            The training step number about to begin.
+        """
+        self._global_step = global_step
+        if self.hook_manager is not None:
+            try:
+                self.hook_manager.set_global_step(global_step)
+            except Exception as exc:  # pylint: disable=broad-except
+                logger.debug(
+                    "[MoEWatch] pre_step(): failed to propagate global_step "
+                    "to hook_manager: %s",
+                    exc,
+                )
+
     def step(
         self,
         global_step: int,
@@ -481,6 +512,17 @@ class MoEWatch:
         Called by ``MoEWatchCallback.on_step_end()`` after each optimizer
         step. Runs all analyzers, fuses risk scores, selects interventions
         if enabled, and emits alerts if thresholds are crossed.
+
+        Note
+        ----
+        For router/gradient hooks to tag *this* step's captured events
+        with the correct ``global_step`` (rather than the previous
+        step's, or ``0`` on the first step), call :meth:`pre_step` with
+        the same ``global_step`` *before* the forward pass. This method
+        also propagates ``global_step`` to the hook manager as a
+        best-effort fallback for callers that only invoke ``step()``,
+        but that only benefits events captured during the *next* step's
+        forward pass.
 
         Parameters
         ----------
@@ -501,6 +543,21 @@ class MoEWatch:
         from moewatch.report.watch_report import StepReport
 
         self._global_step = global_step
+
+        # Best-effort: propagate to hooks so events captured during the
+        # *next* forward pass carry the correct step number even if the
+        # caller never calls pre_step(). Events captured during *this*
+        # step's already-completed forward/backward pass cannot be fixed
+        # retroactively here.
+        if self.hook_manager is not None:
+            try:
+                self.hook_manager.set_global_step(global_step)
+            except Exception as exc:  # pylint: disable=broad-except
+                logger.debug(
+                    "[MoEWatch] step(): failed to propagate global_step "
+                    "to hook_manager: %s",
+                    exc,
+                )
 
         # ---- 1. Run all analyzers ----
         entropy_reports = {}
@@ -621,6 +678,21 @@ class MoEWatch:
                     "[MoEWatch] Observation window check error at step %d: %s",
                     global_step, exc,
                 )
+        elif self.config.intervention_enabled and not self._intervention_gap_warned:
+            # intervention_enabled=True but no intervention_engine/policy is
+            # active. Under normal operation start() always initialises
+            # these when intervention_enabled=True, so reaching this branch
+            # indicates _init_intervention_system() failed or was skipped
+            # unexpectedly. Without this warning, intervention_enabled=True
+            # would silently have no effect.
+            self._intervention_gap_warned = True
+            logger.warning(
+                "[MoEWatch] intervention_enabled=True but no intervention "
+                "engine is active, so no interventions will be applied. "
+                "This is unexpected — start() should initialise the "
+                "intervention system whenever intervention_enabled=True. "
+                "Risk monitoring and alerts continue to work normally."
+            )
 
         # ---- 6. Emit periodic reports ----
         step_report = StepReport(
@@ -902,9 +974,9 @@ class MoEWatch:
     def _init_intervention_system(self) -> None:
         """Instantiate the intervention engine and policy.
 
-        Called after the trainer is available. Separated from ``start()``
-        because the trainer reference may arrive via ``attach()`` after
-        ``start()`` is first called.
+        Interventions are applied directly to ``self.model`` (a
+        ``torch.nn.Module``), so this can be called from ``start()``
+        regardless of whether a HuggingFace Trainer is attached.
         """
         from moewatch.intervention.engine import InterventionEngine
         from moewatch.policy.rule_policy import RulePolicy
@@ -912,7 +984,7 @@ class MoEWatch:
 
         self.intervention_engine = InterventionEngine(
             config=self.config,
-            trainer=self._trainer,
+            model=self.model,
             baseline_tracker=self.baseline_tracker,
         )
 

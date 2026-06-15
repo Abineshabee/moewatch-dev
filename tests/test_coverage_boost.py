@@ -759,23 +759,21 @@ class TestAuxLossAction:
     def test_apply_increases_coef_and_revert_restores(self) -> None:
         model = _FakeModelWithAuxCoef()
         model.config = _ConfigObj(aux_loss_coef=0.01)
-        trainer = _FakeTrainer(model)
 
         action = AuxLossAction(layer_name="layers.0.gate", delta=0.05)
-        action.apply(trainer)
+        action.apply(model)
         assert model.config.aux_loss_coef == pytest.approx(0.06)
 
-        action.revert(trainer)
+        action.revert(model)
         assert model.config.aux_loss_coef == pytest.approx(0.01)
 
     def test_apply_is_idempotent(self) -> None:
         model = _FakeModelWithAuxCoef()
         model.config = _ConfigObj(aux_loss_coef=0.01)
-        trainer = _FakeTrainer(model)
 
         action = AuxLossAction(layer_name="layers.0.gate", delta=0.05)
-        action.apply(trainer)
-        action.apply(trainer)  # second call should be a no-op
+        action.apply(model)
+        action.apply(model)  # second call should be a no-op
         assert model.config.aux_loss_coef == pytest.approx(0.06)
 
     def test_apply_with_router_aux_loss_coef_attr(self) -> None:

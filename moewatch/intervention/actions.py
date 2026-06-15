@@ -29,11 +29,11 @@
 #                   - NoOpAction           — conservative baseline; does
 #                                            nothing.
 #
-#                 All actions are applied/reverted against a HuggingFace
-#                 ``transformers.Trainer`` instance. Hooks registered by
+#                 All actions are applied/reverted against the model
+#                 (``torch.nn.Module``) being trained. Hooks registered by
 #                 actions are read-only with respect to model *weights*
 #                 (zero weight modification guarantee) — only forward-pass
-#                 *behaviour* (e.g. injected noise) or trainer/config
+#                 *behaviour* (e.g. injected noise) or model/config
 #                 hyperparameters are touched, and every change is
 #                 reversible via :meth:`InterventionAction.revert`.
 #
@@ -55,9 +55,9 @@
 #
 #   action = AuxLossAction(layer_name="model.layers.5.block_sparse_moe.gate",
 #                           delta=0.05)
-#   action.apply(trainer)
+#   action.apply(model)
 #   ...
-#   action.revert(trainer)
+#   action.revert(model)
 #
 # =============================================================================
 
@@ -150,18 +150,18 @@ class InterventionAction(ABC):
     # ------------------------------------------------------------------
 
     @abstractmethod
-    def apply(self, trainer: Any) -> None:
+    def apply(self, model: Any) -> None:
         """Apply this action to live training.
 
-        Modifies ``trainer`` state (model configuration, hyperparameters,
-        or forward-pass hooks) in a targeted, bounded, and reversible way.
+        Modifies ``model`` state (configuration, hyperparameters, or
+        forward-pass hooks) in a targeted, bounded, and reversible way.
 
         Parameters
         ----------
-        trainer : transformers.Trainer
-            The HuggingFace trainer driving the current training run.
-            Concrete subclasses access ``trainer.model``,
-            ``trainer.args``, or similar as required.
+        model : torch.nn.Module
+            The model being trained. Concrete subclasses access
+            ``model.config``, named submodules via
+            ``model.get_submodule(...)``, or similar as required.
 
         Returns
         -------
@@ -179,13 +179,13 @@ class InterventionAction(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def revert(self, trainer: Any) -> None:
+    def revert(self, model: Any) -> None:
         """Undo this action, restoring previous values.
 
         Parameters
         ----------
-        trainer : transformers.Trainer
-            The HuggingFace trainer driving the current training run.
+        model : torch.nn.Module
+            The model being trained.
 
         Returns
         -------
@@ -245,13 +245,13 @@ class InterventionAction(ABC):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _resolve_module(trainer: Any, layer_name: str) -> Optional["torch.nn.Module"]:
-        """Resolve ``layer_name`` to a module on ``trainer.model``.
+    def _resolve_module(model: Any, layer_name: str) -> Optional["torch.nn.Module"]:
+        """Resolve ``layer_name`` to a submodule on ``model``.
 
         Parameters
         ----------
-        trainer : transformers.Trainer
-            Trainer whose ``model`` attribute will be searched.
+        model : torch.nn.Module
+            Model to search.
         layer_name : str
             Dotted module path, e.g.
             ``"model.layers.5.block_sparse_moe.gate"``.
@@ -259,11 +259,10 @@ class InterventionAction(ABC):
         Returns
         -------
         torch.nn.Module or None
-            The resolved submodule, or ``None`` if ``trainer`` has no
-            usable ``model`` attribute or the path does not resolve
-            (logged as a warning rather than raised, so that a single
-            unresolvable layer downgrades gracefully rather than crashing
-            training).
+            The resolved submodule, or ``None`` if ``model`` is ``None``
+            or the path does not resolve (logged as a warning rather than
+            raised, so that a single unresolvable layer downgrades
+            gracefully rather than crashing training).
 
         Notes
         -----
@@ -271,11 +270,10 @@ class InterventionAction(ABC):
         ``AttributeError`` for an invalid path; that error is caught and
         converted into a logged warning + ``None`` return.
         """
-        model = getattr(trainer, "model", None)
         if model is None:
             logger.warning(
-                "[MoEWatch] InterventionAction: trainer has no 'model' "
-                "attribute; cannot resolve layer '%s'.",
+                "[MoEWatch] InterventionAction: model is None; cannot "
+                "resolve layer '%s'.",
                 layer_name,
             )
             return None
@@ -359,13 +357,13 @@ class AuxLossAction(InterventionAction):
         self._original_coef: Optional[float] = None
         self._coef_attr: Optional[str] = None
 
-    def apply(self, trainer: Any) -> None:
+    def apply(self, model: Any) -> None:
         """Increase ``aux_loss_coef`` on the model config by :attr:`delta`.
 
         Parameters
         ----------
-        trainer : transformers.Trainer
-            Trainer whose ``model.config`` will be modified.
+        model : torch.nn.Module
+            Model whose ``.config`` will be modified.
 
         Returns
         -------
@@ -385,7 +383,7 @@ class AuxLossAction(InterventionAction):
             )
             return
 
-        config = self._resolve_config(trainer)
+        config = self._resolve_config(model)
         if config is None:
             return
 
@@ -415,13 +413,13 @@ class AuxLossAction(InterventionAction):
             self.layer_name,
         )
 
-    def revert(self, trainer: Any) -> None:
+    def revert(self, model: Any) -> None:
         """Restore the original auxiliary loss coefficient.
 
         Parameters
         ----------
-        trainer : transformers.Trainer
-            Trainer whose ``model.config`` will be restored.
+        model : torch.nn.Module
+            Model whose ``.config`` will be restored.
 
         Returns
         -------
@@ -435,7 +433,7 @@ class AuxLossAction(InterventionAction):
         if self._original_coef is None or self._coef_attr is None:
             return
 
-        config = self._resolve_config(trainer)
+        config = self._resolve_config(model)
         if config is None:
             return
 
@@ -452,13 +450,12 @@ class AuxLossAction(InterventionAction):
         self._coef_attr = None
 
     @staticmethod
-    def _resolve_config(trainer: Any) -> Optional[Any]:
-        """Return ``trainer.model.config``, or ``None`` if unavailable."""
-        model = getattr(trainer, "model", None)
+    def _resolve_config(model: Any) -> Optional[Any]:
+        """Return ``model.config``, or ``None`` if unavailable."""
         config = getattr(model, "config", None)
         if config is None:
             logger.warning(
-                "[MoEWatch] AuxLossAction: trainer.model.config is "
+                "[MoEWatch] AuxLossAction: model.config is "
                 "unavailable; action is a no-op."
             )
             return None
@@ -529,13 +526,13 @@ class RouterNoiseAction(InterventionAction):
         self._hook_handle: Any = None
         self._warned_unsupported_output: bool = False
 
-    def apply(self, trainer: Any) -> None:
+    def apply(self, model: Any) -> None:
         """Register a forward hook injecting noise into router logits.
 
         Parameters
         ----------
-        trainer : transformers.Trainer
-            Trainer whose model contains the target router module.
+        model : torch.nn.Module
+            Model containing the target router module.
 
         Returns
         -------
@@ -563,7 +560,7 @@ class RouterNoiseAction(InterventionAction):
             )
             return
 
-        module = self._resolve_module(trainer, self.layer_name)
+        module = self._resolve_module(model, self.layer_name)
         if module is None:
             return
 
@@ -602,12 +599,12 @@ class RouterNoiseAction(InterventionAction):
             self.layer_name,
         )
 
-    def revert(self, trainer: Any) -> None:
+    def revert(self, model: Any) -> None:
         """Remove the noise-injection forward hook.
 
         Parameters
         ----------
-        trainer : transformers.Trainer
+        model : torch.nn.Module
             Unused directly; accepted for interface consistency with
             :class:`InterventionAction`.
 
@@ -685,13 +682,13 @@ class ExpertDropoutAction(InterventionAction):
         self.dropout_delta: float = dropout_delta
         self._original_dropout: Optional[dict[str, float]] = None
 
-    def apply(self, trainer: Any) -> None:
+    def apply(self, model: Any) -> None:
         """Increase dropout probability on the target expert module(s).
 
         Parameters
         ----------
-        trainer : transformers.Trainer
-            Trainer whose model contains the target expert module.
+        model : torch.nn.Module
+            Model containing the target expert module.
 
         Returns
         -------
@@ -719,7 +716,7 @@ class ExpertDropoutAction(InterventionAction):
             )
             return
 
-        module = self._resolve_module(trainer, self.layer_name)
+        module = self._resolve_module(model, self.layer_name)
         if module is None:
             return
 
@@ -748,13 +745,13 @@ class ExpertDropoutAction(InterventionAction):
             self.layer_name,
         )
 
-    def revert(self, trainer: Any) -> None:
+    def revert(self, model: Any) -> None:
         """Restore the original dropout probabilities.
 
         Parameters
         ----------
-        trainer : transformers.Trainer
-            Trainer whose model contains the target expert module.
+        model : torch.nn.Module
+            Model containing the target expert module.
 
         Returns
         -------
@@ -769,7 +766,7 @@ class ExpertDropoutAction(InterventionAction):
         if self._original_dropout is None:
             return
 
-        module = self._resolve_module(trainer, self.layer_name)
+        module = self._resolve_module(model, self.layer_name)
         if module is None:
             self._original_dropout = None
             return
@@ -855,12 +852,12 @@ class NoOpAction(InterventionAction):
     def __init__(self, layer_name: str = "<none>") -> None:
         super().__init__(action_type="noop", layer_name=layer_name, delta=0.0)
 
-    def apply(self, trainer: Any) -> None:
+    def apply(self, model: Any) -> None:
         """No-op (do nothing).
 
         Parameters
         ----------
-        trainer : transformers.Trainer
+        model : torch.nn.Module
             Unused; accepted for interface consistency.
 
         Returns
@@ -869,12 +866,12 @@ class NoOpAction(InterventionAction):
         """
         return None
 
-    def revert(self, trainer: Any) -> None:
+    def revert(self, model: Any) -> None:
         """No-op (do nothing).
 
         Parameters
         ----------
-        trainer : transformers.Trainer
+        model : torch.nn.Module
             Unused; accepted for interface consistency.
 
         Returns

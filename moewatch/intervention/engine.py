@@ -15,7 +15,7 @@
 #
 #                   1. Validates the action against SafetyGuard.
 #                   2. Applies the (possibly downgraded) action to the
-#                      running trainer.
+#                      model being trained.
 #                   3. Marks the affected layer's intervention-exclusion
 #                      window in BaselineTracker, to prevent baseline
 #                      contamination.
@@ -44,7 +44,7 @@
 # -----
 #   from moewatch.intervention.engine import InterventionEngine
 #
-#   engine = InterventionEngine(config, trainer, baseline_tracker)
+#   engine = InterventionEngine(config, model, baseline_tracker)
 #
 #   validated = engine.propose_intervention(
 #       action, current_loss, risk_scores, layer_order, step
@@ -86,7 +86,7 @@ class InterventionEngine:
        original action or a downgraded
        :class:`~moewatch.intervention.actions.NoOpAction`.
     2. :meth:`apply_intervention` — apply the validated action to
-       :attr:`trainer`, record it as active, mark the baseline-exclusion
+       :attr:`model`, record it as active, mark the baseline-exclusion
        window, and schedule an observation window.
     3. :meth:`check_observation_windows` — called every step; for each
        expired observation window, compute the counterfactual reward,
@@ -96,10 +96,9 @@ class InterventionEngine:
     ----------
     config : WatchConfig
         Shared configuration. Uses ``config.reward_window_steps``.
-    trainer : transformers.Trainer
-        HuggingFace trainer driving the current training run. Passed
-        through to :meth:`InterventionAction.apply` /
-        :meth:`InterventionAction.revert`.
+    model : torch.nn.Module
+        The model being trained. Passed through to
+        :meth:`InterventionAction.apply` / :meth:`InterventionAction.revert`.
     baseline_tracker : BaselineTracker
         Per-layer counterfactual baseline tracker, shared with
         :class:`~moewatch.analyzer.risk_score.RiskScoreFuser` consumers and
@@ -109,7 +108,7 @@ class InterventionEngine:
     ----------
     config : WatchConfig
         See above.
-    trainer : transformers.Trainer
+    model : torch.nn.Module
         See above.
     safety_guard : SafetyGuard
         Pre-flight safety validator, constructed internally.
@@ -120,11 +119,11 @@ class InterventionEngine:
     def __init__(
         self,
         config: WatchConfig,
-        trainer: Any,
+        model: Any,
         baseline_tracker: BaselineTracker,
     ) -> None:
         self.config: WatchConfig = config
-        self.trainer: Any = trainer
+        self.model: Any = model
         self.safety_guard: SafetyGuard = SafetyGuard(config)
         self.baseline_tracker: BaselineTracker = baseline_tracker
 
@@ -278,7 +277,7 @@ class InterventionEngine:
 
         For non-NoOp actions:
 
-        - ``action.apply(self.trainer)`` is called.
+        - ``action.apply(self.model)`` is called.
         - The action is recorded in :attr:`_active_interventions` as
           ``(action, step)``.
         - :meth:`SafetyGuard.record_intervention` is called so future
@@ -290,7 +289,7 @@ class InterventionEngine:
           ``(step, step + config.reward_window_steps)`` is recorded in
           :attr:`_observation_windows`.
         """
-        action.apply(self.trainer)
+        action.apply(self.model)
 
         self._intervention_log.append(
             {
@@ -419,7 +418,7 @@ class InterventionEngine:
             reward = self._compute_reward(layer_name, actual_risk)
 
             if reward <= 0.0:
-                action.revert(self.trainer)
+                action.revert(self.model)
                 outcome = "failure"
                 logger.info(
                     "[MoEWatch] InterventionEngine: %s at step %d "
