@@ -356,6 +356,7 @@ class AuxLossAction(InterventionAction):
         super().__init__(action_type="aux_loss", layer_name=layer_name, delta=delta)
         self._original_coef: Optional[float] = None
         self._coef_attr: Optional[str] = None
+        self._fallback_action: Optional["RouterNoiseAction"] = None
 
     def apply(self, model: Any) -> None:
         """Increase ``aux_loss_coef`` on the model config by :attr:`delta`.
@@ -385,6 +386,25 @@ class AuxLossAction(InterventionAction):
 
         config = self._resolve_config(model)
         if config is None:
+            # Only fall back to RouterNoiseAction when model is a real
+            # nn.Module (has get_submodule). If it's a trainer wrapper or
+            # other object without get_submodule, stay as a true no-op to
+            # preserve backward-compatibility with existing tests and the
+            # HuggingFace Trainer path.
+            if hasattr(model, "get_submodule") and self._fallback_action is None:
+                self._fallback_action = RouterNoiseAction(
+                    layer_name=self.layer_name, noise_scale=min(self.delta * 2, 0.5)
+                )
+                self._fallback_action.apply(model)
+                # Set sentinel so the idempotency guard at the top fires
+                # on duplicate apply() calls.
+                self._original_coef = 0.0
+                logger.info(
+                    "[MoEWatch] AuxLossAction: model.config unavailable; "
+                    "applied RouterNoiseAction fallback (noise_scale=%.4f) on '%s'.",
+                    self._fallback_action.noise_scale,
+                    self.layer_name,
+                )
             return
 
         attr = self._find_coef_attr(config)
@@ -431,6 +451,17 @@ class AuxLossAction(InterventionAction):
         ``_original_coef`` is ``None``).
         """
         if self._original_coef is None or self._coef_attr is None:
+            # Check if we used a fallback RouterNoiseAction instead.
+            fallback = getattr(self, "_fallback_action", None)
+            if fallback is not None:
+                fallback.revert(model)
+                self._fallback_action = None
+                self._original_coef = None
+                logger.info(
+                    "[MoEWatch] AuxLossAction: reverted RouterNoiseAction "
+                    "fallback on '%s'.",
+                    self.layer_name,
+                )
             return
 
         config = self._resolve_config(model)

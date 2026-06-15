@@ -206,7 +206,7 @@ class RulePolicy(PolicyBase):
         that mapping in, or post-process the returned action's
         ``layer_name`` attribute before calling ``apply()``.
         """
-        layer_name = f"layer_{state.layer_id}"
+        layer_name = state.layer_name if state.layer_name else f"layer_{state.layer_id}"
         history = self._recent_actions.setdefault(
             layer_name, deque(maxlen=_HISTORY_LEN)
         )

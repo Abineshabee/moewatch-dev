@@ -110,6 +110,7 @@ class PolicyState:
     risk_score: float
     layer_id: int
     training_step: int
+    layer_name: str = ""
     intervention_history: List[str] = field(default_factory=list)
     dominant_signal: str = "entropy"
 
@@ -202,6 +203,7 @@ class PolicyState:
             "risk_score": self.risk_score,
             "layer_id": self.layer_id,
             "training_step": self.training_step,
+            "layer_name": self.layer_name,
             "intervention_history": list(self.intervention_history),
             "dominant_signal": self.dominant_signal,
         }
@@ -231,6 +233,7 @@ class PolicyState:
             risk_score=data.get("risk_score", 0.0),
             layer_id=data.get("layer_id", 0),
             training_step=data.get("training_step", 0),
+            layer_name=data.get("layer_name", ""),
             intervention_history=data.get("intervention_history", []),
             dominant_signal=data.get("dominant_signal", "entropy"),
         )
