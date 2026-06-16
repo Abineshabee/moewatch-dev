@@ -288,6 +288,27 @@ class GradientStarvationAnalyzer:
         # Insufficient data guard
         # ------------------------------------------------------------------
         if n_samples < _MIN_SAMPLES_FOR_DETECTION:
+            # Insufficient samples for reliable trend detection.
+            # However, if we have at least 1 sample and the norm is
+            # exactly zero, this is a confirmed dead expert — compute
+            # the starvation score rather than returning the default 0.0,
+            # which would be misread by the fuser as "healthy".
+            if n_samples >= 1:
+                _early_array = np.array(norm_history, dtype=np.float64)
+                _finite = _early_array[np.isfinite(_early_array)]
+                if len(_finite) >= 1 and float(_finite.mean()) == 0.0:
+                    _cold_thr = max(self.config.cold_threshold, 1e-9)
+                    return GradientStarvationReport(
+                        layer_name=layer_name,
+                        expert_id=expert_id,
+                        gradient_norm_mean=0.0,
+                        gradient_norm_std=0.0,
+                        starvation_score=float(
+                            np.clip(1.0 - 0.0 / _cold_thr, 0.0, 1.0)
+                        ),
+                        step=step,
+                        n_samples=n_samples,
+                    )
             return GradientStarvationReport(
                 layer_name=layer_name,
                 expert_id=expert_id,

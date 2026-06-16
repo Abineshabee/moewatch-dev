@@ -405,6 +405,26 @@ class WatchConfig:
     """
 
     # ------------------------------------------------------------------
+    # AUDIT
+    # ------------------------------------------------------------------
+
+    audit_with_backward: bool = True
+    """Run a proxy backward pass during audit() to populate gradient hooks.
+
+    When True (default), audit() computes a sum-of-logits proxy loss and
+    calls backward() after each forward pass so that Tier 1 gradient
+    starvation hooks fire and gradient_results is populated. Set to False
+    for routing-only audits where backward is too expensive (large models,
+    CPU-only environments, or architectures where the proxy loss produces
+    unstable gradients).
+
+    This value is used as the default for the ``with_backward`` parameter
+    of :func:`moewatch.audit`. Passing ``with_backward`` explicitly to
+    ``audit()`` always takes precedence over this config field.
+    Default: True.
+    """
+
+    # ------------------------------------------------------------------
     # Validation
     # ------------------------------------------------------------------
 
@@ -511,6 +531,13 @@ class WatchConfig:
             raise ValueError(
                 f"loss_guard_threshold must be > 1.0 (a multiplicative spike "
                 f"factor), got {self.loss_guard_threshold}"
+            )
+
+        # audit_with_backward — must be a plain bool
+        if not isinstance(self.audit_with_backward, bool):
+            raise ValueError(
+                f"audit_with_backward must be bool, "
+                f"got {type(self.audit_with_backward).__name__!r}"
             )
 
         # Policy type

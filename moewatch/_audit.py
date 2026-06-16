@@ -80,7 +80,7 @@ def audit(
     num_batches: int = 100,
     config: Optional[WatchConfig] = None,
     device: str = "cpu",
-    with_backward: bool = True,
+    with_backward: Optional[bool] = None,
 ) -> "AuditReport":
     """Run offline diagnostic audit on a trained MoE model.
 
@@ -176,6 +176,11 @@ def audit(
     # Resolve config
     if config is None:
         config = WatchConfig()
+
+    # Resolve with_backward: explicit call-site arg takes precedence,
+    # otherwise fall back to config.audit_with_backward.
+    if with_backward is None:
+        with_backward = config.audit_with_backward
 
     # ------------------------------------------------------------------
     # 1. Device validation and model placement
@@ -719,13 +724,50 @@ def _fuse_risk_scores(
             ent_report = entropy_results.get(layer_name)
             grad_layer_reports = gradient_results.get(layer_name, [])
 
-            # Use the highest-starvation expert as the representative Tier 1
-            # signal for this layer (worst-case for risk fusion).
-            grad_report = (
-                max(grad_layer_reports, key=lambda r: r.starvation_score)
-                if grad_layer_reports
-                else None
-            )
+            # Select the representative Tier 1 signal for this layer.
+            #
+            # Naive max(starvation_score) fails when experts with zero
+            # gradient norms return starvation_score=0.0 due to the
+            # _MIN_SAMPLES_FOR_DETECTION guard — their score looks "healthy"
+            # but they are actually dead (insufficient hook events collected).
+            #
+            # Fix: prefer experts with confirmed data (n_samples >= 1 AND
+            # norm_mean == 0) as truly dead; fall back to max starvation_score
+            # among experts that have data; only use the naive max as last resort.
+            grad_report = None
+            if grad_layer_reports:
+                # 1st priority: experts with actual data showing zero norm
+                #   (truly dead — gradient hook fired but norm was 0.0)
+                confirmed_dead = [
+                    r for r in grad_layer_reports
+                    if getattr(r, "n_samples", 0) >= 1
+                    and getattr(r, "gradient_norm_mean", -1.0) == 0.0
+                ]
+                if confirmed_dead:
+                    # All confirmed-dead experts have starvation_score=1.0;
+                    # pick the one with the most samples for reliability.
+                    grad_report = max(
+                        confirmed_dead,
+                        key=lambda r: getattr(r, "n_samples", 0),
+                    )
+                else:
+                    # 2nd priority: experts that have sufficient samples —
+                    # take the worst starvation score among those.
+                    has_data = [
+                        r for r in grad_layer_reports
+                        if getattr(r, "n_samples", 0) >= 1
+                    ]
+                    if has_data:
+                        grad_report = max(
+                            has_data,
+                            key=lambda r: r.starvation_score,
+                        )
+                    else:
+                        # Last resort: no hook events at all — use naive max.
+                        grad_report = max(
+                            grad_layer_reports,
+                            key=lambda r: r.starvation_score,
+                        )
 
             # Both Tier 1 and Tier 2 are required for meaningful fusion.
             # If either is missing, skip this layer rather than producing
