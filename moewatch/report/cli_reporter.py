@@ -102,14 +102,18 @@ _RISK_COLORS: Dict[str, Tuple[str, str]] = {
 }
 
 _ALERT_COLORS: Dict[str, Tuple[str, str]] = {
-    AlertLevel.INFO.value:     ("bright_cyan", _ANSI_CYAN),
-    AlertLevel.WARNING.value:  ("yellow",      _ANSI_YELLOW),
-    AlertLevel.CRITICAL.value: ("bold red",    _ANSI_RED),
+    AlertLevel.DEBUG.value:    ("bright_black", "\033[90m"),
+    AlertLevel.INFO.value:     ("bright_cyan",  _ANSI_CYAN),
+    AlertLevel.WARNING.value:  ("yellow",       _ANSI_YELLOW),
+    AlertLevel.ERROR.value:    ("bold orange1", "\033[33m"),
+    AlertLevel.CRITICAL.value: ("bold red",     _ANSI_RED),
 }
 
 _ALERT_ICONS: Dict[str, str] = {
+    AlertLevel.DEBUG.value:    "·",
     AlertLevel.INFO.value:     "i",
     AlertLevel.WARNING.value:  "!",
+    AlertLevel.ERROR.value:    "E",
     AlertLevel.CRITICAL.value: "X",
 }
 
@@ -746,6 +750,7 @@ class CLIReporter:
             f"[italic]{alert.signal_type}[/]  "
             f"{alert.message}"
         )
+        # -- Print to real terminal with color --
         self._console.print(line)
 
         # -- Capture an equivalent plain-text string for the return value -
@@ -911,7 +916,6 @@ class CLIReporter:
             f"step={alert.step}  {_short_layer_name(alert.layer_id)}  "
             f"{alert.signal_type}  {alert.message}"
         )
-        print(line, file=sys.stdout)
         return line
 
 

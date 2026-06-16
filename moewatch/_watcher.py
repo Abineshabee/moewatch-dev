@@ -331,6 +331,10 @@ class MoEWatch:
                 "[MoEWatch] start() called while already running."
             )
 
+        # Suppress all library-internal log output when SILENT mode is set.
+        if self.config.output == OutputMode.SILENT:
+            logging.getLogger("moewatch").setLevel(logging.CRITICAL + 1)
+
         self._start_time = time.time()
 
         # ---- Import sub-systems lazily ----
@@ -403,6 +407,10 @@ class MoEWatch:
             return
 
         self._running = False
+
+        # Restore logger level if it was suppressed by SILENT mode.
+        if self.config.output == OutputMode.SILENT:
+            logging.getLogger("moewatch").setLevel(logging.NOTSET)
 
         try:
             if self.hook_manager is not None:
@@ -1042,6 +1050,7 @@ class MoEWatch:
                 state = PolicyState(
                     risk_score=risk_report.risk_score,
                     layer_id=layer_id,
+                    layer_name=layer_name,
                     training_step=step,
                     intervention_history=self._get_intervention_history(layer_name),
                     dominant_signal=risk_report.dominant_signal,
@@ -1049,9 +1058,6 @@ class MoEWatch:
 
                 # Policy selects candidate action
                 action = self.policy.select_action(state)
-                # Patch layer_name to the real dotted module path so
-                # action.apply(model) can resolve get_submodule() correctly.
-                action.layer_name = layer_name
                 policy_decisions[layer_name] = action.action_type
 
                 # Safety validation and potential downgrade
@@ -1159,15 +1165,18 @@ class MoEWatch:
 
         if self.config.output == OutputMode.CLI and self._cli_reporter is not None:
             try:
-                output = self._cli_reporter.render_dashboard(
+                self._cli_reporter.render_dashboard(
                     watch_report=watch_report,
                     entropy_analyzer=self.entropy_analyzer,
                     collapse_detector=self.collapse_detector,
                     risk_fuser=self.risk_fuser,
                 )
-                print(output, flush=True)
                 for alert in alerts:
-                    print(self._cli_reporter.render_alert(alert), flush=True)
+                    rendered = self._cli_reporter.render_alert(alert)
+                    # Rich path prints to terminal internally via _console.
+                    # Plain fallback does not — re-print the return value.
+                    if self._cli_reporter._console is None:
+                        print(rendered, flush=True)
             except Exception as exc:
                 logger.debug("[MoEWatch] CLIReporter error: %s", exc)
 

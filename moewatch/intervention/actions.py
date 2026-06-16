@@ -485,9 +485,9 @@ class AuxLossAction(InterventionAction):
         """Return ``model.config``, or ``None`` if unavailable."""
         config = getattr(model, "config", None)
         if config is None:
-            logger.warning(
-                "[MoEWatch] AuxLossAction: model.config is "
-                "unavailable; action is a no-op."
+            logger.debug(
+                "[MoEWatch] AuxLossAction: model.config is unavailable; "
+                "will use RouterNoiseAction fallback if model is an nn.Module."
             )
             return None
         return config

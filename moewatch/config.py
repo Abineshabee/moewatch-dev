@@ -68,18 +68,70 @@ class OutputMode(str, Enum):
 class AlertLevel(str, Enum):
     """Severity classification for alerts emitted by MoEWatch.
 
+    Mirrors Python's ``logging`` module severity ladder so that alert
+    levels can be compared, filtered, and mapped to log handlers without
+    translation.  Levels are ordered from least to most severe:
+    ``DEBUG < INFO < WARNING < ERROR < CRITICAL``.
+
     Attributes
     ----------
+    DEBUG:
+        Fine-grained diagnostic signal. Sub-threshold observation that
+        does not yet require attention.  Useful for tracing routing
+        dynamics during development or hyperparameter search.
+
+        Example::
+
+            # Expert utilisation is trending downward but still within
+            # healthy bounds.
+            AlertLevel.DEBUG
+
     INFO:
-        Informational notice. No immediate action required.
+        Informational notice. No immediate action required.  Indicates
+        a noteworthy routing event that is within acceptable limits.
+
+        Example::
+
+            # A previously cold expert recovered to HEALTHY state.
+            AlertLevel.INFO
+
     WARNING:
-        Elevated signal. Routing health degrading; monitor closely.
+        Elevated signal. Routing health is degrading; monitor closely.
+        Thresholds have been crossed but the model is still recoverable
+        without intervention.
+
+        Example::
+
+            # Normalised entropy fell below ``entropy_warn`` threshold.
+            AlertLevel.WARNING
+
+    ERROR:
+        Serious degradation detected. Collapse is likely without action.
+        Sits between WARNING and CRITICAL — the model is still training
+        but expert routing is severely impaired.
+
+        Example::
+
+            # Multiple experts simultaneously entered DEAD state across
+            # more than half of the router layers.
+            AlertLevel.ERROR
+
     CRITICAL:
         Imminent collapse risk. Intervention recommended or triggered.
+        MoEWatch will attempt an automatic intervention (if enabled) and
+        the training run should be inspected immediately.
+
+        Example::
+
+            # Normalised entropy critically low; all tokens routed to a
+            # single expert for the past N consecutive steps.
+            AlertLevel.CRITICAL
     """
 
+    DEBUG = "debug"
     INFO = "info"
     WARNING = "warning"
+    ERROR = "error"
     CRITICAL = "critical"
 
 
