@@ -996,6 +996,14 @@ const TREE = [
    desc:'Integration test for audit() end-to-end on CPU. AuditReport non-empty, dead_experts() returns list, gradient starvation report populated, cross-layer report populated, to_json() is valid JSON, no hooks leaked after completion.',
    exports:[], deps:[]},
 
+  {type:'file', name:'test_cli_reporter.py', indent:2, path:'tests/test_cli_reporter.py', badge:'test',
+   desc:'Coverage-focused tests for the redesigned moewatch/report/cli_reporter.py (v0.2.0).Covers __init__ variants (no_color, NO_COLOR env var, Rich unavailable), render_dashboard (empty report, Rich path, plain-ANSI fallback path, with/without entropy/collapse data, NaN loss, unknown risk level), render_alert (Rich + plain, all AlertLevels, no_color), and the module-private helper functions (_ascii_risk_bar, _expert_util_bar, _sparkline, _entropy_trend_arrow, _short_layer_name).',
+   exports:[], deps:[]},
+
+  {type:'file', name:'test_coverage_boost.py', indent:2, path:'tests/test_coverage_boost.py', badge:'test',
+   desc:'Supplementary coverage-focused tests targeting modules that were under-tested as of the v0.2.0 360-test baseline.',
+   exports:[], deps:[]},
+
   // ── BENCHMARKS ────────────────────────────────────────────────────
   {type:'dir', name:'benchmarks/', indent:1, path:'benchmarks/',
    desc:'Performance and scientific benchmarks. Overhead profiling, lead-time advantage measurement, IES computation. Results stored as JSON for CI regression tracking.',
