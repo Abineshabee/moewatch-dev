@@ -80,6 +80,7 @@ def audit(
     num_batches: int = 100,
     config: Optional[WatchConfig] = None,
     device: str = "cpu",
+    with_backward: bool = True,
 ) -> "AuditReport":
     """Run offline diagnostic audit on a trained MoE model.
 
@@ -90,7 +91,7 @@ def audit(
     Returns a comprehensive, serializable ``AuditReport``.
 
     No hooks remain attached after this function returns. Model weights
-    are never modified. Gradient computation is disabled throughout.
+    are never modified (gradients are zeroed after each backward pass).
 
     Parameters
     ----------
@@ -100,7 +101,12 @@ def audit(
         ``config.router_modules`` override must be provided.
     dataloader : torch.utils.data.DataLoader
         Validation dataloader. Batches are iterated up to ``num_batches``
-        and fed through the model. The audit does not call ``backward()``.
+        and fed through the model.
+    with_backward : bool, optional
+        If True (default), runs a proxy backward pass (sum-of-logits loss)
+        after each forward pass so that gradient hooks fire and Tier 1
+        (gradient starvation) analysis is populated. Set to False for
+        routing-only audits where backward is too expensive or unavailable.
     num_batches : int, optional
         Maximum number of batches to process. Audit stops early if the
         dataloader is exhausted before this limit. Default: 100.
@@ -240,6 +246,7 @@ def audit(
             dataloader=dataloader,
             num_batches=num_batches,
             device=resolved_device,
+            with_backward=with_backward,
         )
 
         logger.info(
@@ -437,13 +444,16 @@ def _run_forward_loop(
     dataloader: torch.utils.data.DataLoader,
     num_batches: int,
     device: str,
+    with_backward: bool = True,
 ) -> int:
     """Run forward passes through the model to collect routing statistics.
 
     Iterates the dataloader up to ``num_batches`` times. Each batch is
-    moved to ``device`` and passed through the model under
-    ``torch.no_grad()``. The routing hooks registered by ``HookManager``
-    capture the necessary statistics automatically.
+    moved to ``device`` and passed through the model. When ``with_backward``
+    is True, a proxy backward pass (sum-of-outputs loss) is executed after
+    each forward so that parameter-level gradient hooks fire and Tier 1
+    (gradient starvation) analysis is populated. Gradients are zeroed
+    immediately after each backward — weights are never updated.
 
     Parameters
     ----------
@@ -455,6 +465,9 @@ def _run_forward_loop(
         Maximum batches to process.
     device : str
         Device to move each batch to before forward pass.
+    with_backward : bool, optional
+        If True, run a proxy backward pass to populate gradient hooks.
+        If False, run under ``torch.no_grad()`` (routing stats only).
 
     Returns
     -------
@@ -465,48 +478,102 @@ def _run_forward_loop(
     model.eval()
     batches_processed = 0
 
-    with torch.no_grad():
-        for batch_idx, batch in enumerate(dataloader):
-            if batch_idx >= num_batches:
-                break
+    for batch_idx, batch in enumerate(dataloader):
+        if batch_idx >= num_batches:
+            break
 
-            try:
-                batch = _move_batch_to_device(batch, device)
-                _run_single_forward(model, batch)
-                batches_processed += 1
+        try:
+            batch = _move_batch_to_device(batch, device)
 
-                if batches_processed % 10 == 0:
-                    logger.debug(
-                        "[MoEWatch] audit(): processed %d / %d batches.",
-                        batches_processed,
-                        num_batches,
-                    )
+            if with_backward:
+                # Enable gradients for this pass so param hooks fire.
+                # Use a sum-of-outputs proxy loss — label-free and cheap.
+                model.zero_grad(set_to_none=True)
+                output = _run_single_forward(model, batch, return_output=True)
+                proxy_loss = _proxy_loss(output)
+                if proxy_loss is not None:
+                    proxy_loss.backward()
+                model.zero_grad(set_to_none=True)  # never accumulate
+            else:
+                with torch.no_grad():
+                    _run_single_forward(model, batch)
 
-            except StopIteration:
-                # DataLoader exhausted mid-iteration (edge case with some
-                # custom dataset implementations)
+            batches_processed += 1
+
+            if batches_processed % 10 == 0:
                 logger.debug(
-                    "[MoEWatch] audit(): dataloader exhausted at batch %d.",
-                    batch_idx,
+                    "[MoEWatch] audit(): processed %d / %d batches.",
+                    batches_processed,
+                    num_batches,
                 )
-                break
 
-            except RuntimeError:
-                # Fatal errors (OOM, CUDA error, or other errors raised
-                # from within the model's forward pass) propagate to the
-                # caller rather than being silently skipped.
-                raise
+        except StopIteration:
+            logger.debug(
+                "[MoEWatch] audit(): dataloader exhausted at batch %d.",
+                batch_idx,
+            )
+            break
 
-            except Exception as exc:  # pylint: disable=broad-except
-                logger.warning(
-                    "[MoEWatch] audit(): forward pass error on batch %d "
-                    "(skipping): %s",
-                    batch_idx,
-                    exc,
-                )
-                # Continue to next batch on non-fatal errors.
+        except RuntimeError:
+            # Fatal errors (OOM, CUDA error) propagate to the caller.
+            raise
+
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning(
+                "[MoEWatch] audit(): forward pass error on batch %d "
+                "(skipping): %s",
+                batch_idx,
+                exc,
+            )
 
     return batches_processed
+
+
+def _proxy_loss(output: object) -> "Optional[torch.Tensor]":
+    """Derive a scalar proxy loss from a model output for backward pass.
+
+    Traverses common output formats (tensor, tuple/list, dict with
+    ``logits`` or ``last_hidden_state``) to find a float tensor, then
+    returns its sum as a scalar. Returns None if no suitable tensor is
+    found, in which case the backward pass is skipped gracefully.
+
+    Parameters
+    ----------
+    output : object
+        Raw return value of a model forward pass.
+
+    Returns
+    -------
+    torch.Tensor or None
+        Scalar tensor suitable for ``backward()``, or None.
+    """
+    def _find_tensor(obj: object) -> "Optional[torch.Tensor]":
+        if isinstance(obj, torch.Tensor) and obj.is_floating_point():
+            return obj
+        if isinstance(obj, dict):
+            for key in ("logits", "last_hidden_state"):
+                if key in obj and isinstance(obj[key], torch.Tensor):
+                    return obj[key]
+            # Fall back to first float tensor in the dict
+            for v in obj.values():
+                t = _find_tensor(v)
+                if t is not None:
+                    return t
+        if isinstance(obj, (list, tuple)):
+            for item in obj:
+                t = _find_tensor(item)
+                if t is not None:
+                    return t
+        return None
+
+    tensor = _find_tensor(output)
+    if tensor is None:
+        logger.debug(
+            "[MoEWatch] _proxy_loss: no float tensor found in output; "
+            "skipping backward for this batch."
+        )
+        return None
+    return tensor.sum()
 
 
 def _move_batch_to_device(
@@ -554,18 +621,21 @@ def _move_batch_to_device(
     return batch
 
 
-def _run_single_forward(model: nn.Module, batch: object) -> None:
+def _run_single_forward(
+    model: nn.Module,
+    batch: object,
+    return_output: bool = False,
+) -> object:
     """Execute a single forward pass, tolerating common batch formats.
 
     Attempts to call the model with the most likely argument format based
-    on the batch type. Suppresses the model's return value since we only
-    care about the side effects (routing hook events).
+    on the batch type.
 
     Forward call strategy (in order):
-      1. ``dict`` batch  → ``model(**batch)``
-      2. ``tuple``/``list`` batch → ``model(*batch)``
-      3. ``tensor`` batch → ``model(batch)``
-      4. Any failure     → ``model(batch)`` as last resort
+      1. ``dict`` batch        → ``model(**batch)``
+      2. ``tuple``/``list``    → ``model(*batch)``
+      3. ``tensor`` / other    → ``model(batch)``
+      4. ``TypeError`` fallback → ``model(batch)``
 
     Parameters
     ----------
@@ -573,25 +643,32 @@ def _run_single_forward(model: nn.Module, batch: object) -> None:
         Model with hooks attached.
     batch : object
         Pre-processed batch (already on the correct device).
+    return_output : bool, optional
+        If True, return the model's output for proxy loss computation.
+        If False, return None (routing side-effects only).
+
+    Returns
+    -------
+    object or None
+        Model output when ``return_output`` is True, else None.
     """
     try:
         if isinstance(batch, dict):
-            # HuggingFace-style: input_ids, attention_mask, etc.
-            model(**batch)
+            output = model(**batch)
         elif isinstance(batch, (list, tuple)):
-            model(*batch)
+            output = model(*batch)
         else:
-            model(batch)
+            output = model(batch)
 
     except TypeError as exc:
-        # Argument unpacking failed — try passing the batch directly.
-        # This handles custom models with non-standard __call__ signatures.
         logger.debug(
             "[MoEWatch] Forward pass call convention mismatch (%s). "
             "Retrying with positional arg.",
             exc,
         )
-        model(batch)
+        output = model(batch)
+
+    return output if return_output else None
 
 
 def _fuse_risk_scores(

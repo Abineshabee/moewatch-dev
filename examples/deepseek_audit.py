@@ -18,19 +18,23 @@
 #                  - Top-6 expert routing
 #                  - Fine-grained expert segmentation (DeepSeek pattern)
 #
-#                Three post-training health scenarios are audited:
+#                Four post-training health scenarios are audited:
 #                  Scenario A — Healthy checkpoint (uniform routing)
 #                  Scenario B — Partially collapsed checkpoint (mid-training)
 #                  Scenario C — Severely collapsed checkpoint (routing failure)
+#                  Scenario D — Intervention comparison: Scenario C re-audited
+#                               after noise injection, showing before/after
+#                               risk score improvement per layer.
 #
 #                Demonstrates:
-#                  • audit() offline API (no Trainer, no live hooks)
+#                  • audit() offline API with with_backward=True (Tier 1 active)
 #                  • AuditReport.summary() — human-readable text report
 #                  • AuditReport.layers_by_risk() — risk ranking
 #                  • AuditReport.dead_experts() — dead expert enumeration
 #                  • AuditReport.gradient_starved_experts() — starvation scan
 #                  • AuditReport.to_json() — serialization to disk
 #                  • AuditReport.to_dataframe() — pandas tabular export
+#                  • Before/after intervention comparison table
 #
 # Usage
 # -----
@@ -259,6 +263,26 @@ class FakeDeepSeekModel(nn.Module):
                 gate.weight.zero_()
                 gate.weight[dominant_expert] += 6.0   # extreme bias
 
+    def apply_noise_intervention(self, noise_scale: float = 0.3) -> None:
+        """Inject uniform noise into all router gate weights.
+
+        Simulates a RouterNoiseAction intervention — perturbs the gate
+        weights to break expert monopoly and encourage load redistribution.
+        Used in Scenario D to demonstrate before/after risk comparison.
+
+        Parameters
+        ----------
+        noise_scale : float
+            Standard deviation of additive Gaussian noise applied to each
+            gate weight row. Higher values force more uniform routing.
+        """
+        with torch.no_grad():
+            for i in self._moe_layer_indices:
+                gate = self.layers[i].mlp.gate
+                gate.weight.add_(
+                    torch.randn_like(gate.weight) * noise_scale
+                )
+
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         x = self.embed(input_ids)
         for layer in self.layers:
@@ -405,6 +429,7 @@ def run_audit() -> None:
         num_batches=40,
         config=config,
         device="cpu",
+        with_backward=True,
     )
     print_audit_results("A — Healthy Checkpoint", report_a, show_full_summary=False)
 
@@ -421,6 +446,7 @@ def run_audit() -> None:
         num_batches=40,
         config=config,
         device="cpu",
+        with_backward=True,
     )
     print_audit_results("B — Partial Collapse (mid-training)", report_b, show_full_summary=False)
 
@@ -437,8 +463,54 @@ def run_audit() -> None:
         num_batches=40,
         config=config,
         device="cpu",
+        with_backward=True,
     )
     print_audit_results("C — Severe Collapse (routing failure)", report_c, show_full_summary=True)
+
+    # ------------------------------------------------------------------
+    # Scenario D — Intervention comparison (before vs after noise injection)
+    # ------------------------------------------------------------------
+    print(f"\n{'=' * 70}")
+    print("  Scenario: D — Intervention Comparison (Before vs After)")
+    print(f"{'=' * 70}")
+    print("  [D] Starting from Scenario C (severe collapse) state ...")
+    print("  [D] Applying noise intervention (noise_scale=0.3) to all gates ...")
+    model.apply_noise_intervention(noise_scale=0.3)
+
+    loader_d = make_val_loader(num_batches=40, batch_size=4, seq_len=32)
+    report_d = audit(
+        model=model,
+        dataloader=loader_d,
+        num_batches=40,
+        config=config,
+        device="cpu",
+        with_backward=True,
+    )
+
+    # Per-layer before/after comparison
+    print(f"\n  {'Layer':<35}  {'Before (C)':>12}  {'After (D)':>12}  {'Delta':>10}  {'Improved?':>10}")
+    print(f"  {'-' * 35}  {'-' * 12}  {'-' * 12}  {'-' * 10}  {'-' * 10}")
+
+    improved_count = 0
+    all_layers = sorted(set(report_c.risk_scores.keys()) | set(report_d.risk_scores.keys()))
+    for layer_name in all_layers:
+        rr_c = report_c.risk_scores.get(layer_name)
+        rr_d = report_d.risk_scores.get(layer_name)
+        score_c = rr_c.risk_score if rr_c else float("nan")
+        score_d = rr_d.risk_score if rr_d else float("nan")
+        delta   = score_d - score_c
+        improved = delta < -0.001
+        if improved:
+            improved_count += 1
+        flag = "YES ✓" if improved else ("--" if abs(delta) <= 0.001 else "NO ✗")
+        print(
+            f"  {layer_name:<35}  {score_c:>12.4f}  {score_d:>12.4f}  "
+            f"{delta:>+10.4f}  {flag:>10}"
+        )
+
+    print(f"\n  Layers improved after intervention: {improved_count} / {len(all_layers)}")
+    print(f"  Avg risk before : {sum(r.risk_score for r in report_c.risk_scores.values()) / max(len(report_c.risk_scores), 1):.4f}")
+    print(f"  Avg risk after  : {sum(r.risk_score for r in report_d.risk_scores.values()) / max(len(report_d.risk_scores), 1):.4f}")
 
     # ------------------------------------------------------------------
     # Cross-scenario comparison
@@ -446,8 +518,8 @@ def run_audit() -> None:
     print(f"\n{'=' * 70}")
     print("  Cross-Scenario Comparison")
     print(f"{'=' * 70}")
-    print(f"  {'Metric':<35}  {'Scenario A':>12}  {'Scenario B':>12}  {'Scenario C':>12}")
-    print(f"  {'-' * 35}  {'-' * 12}  {'-' * 12}  {'-' * 12}")
+    print(f"  {'Metric':<35}  {'Scenario A':>12}  {'Scenario B':>12}  {'Scenario C':>12}  {'Scenario D':>12}")
+    print(f"  {'-' * 35}  {'-' * 12}  {'-' * 12}  {'-' * 12}  {'-' * 12}")
 
     def _top_risk(r):
         ranked = r.layers_by_risk()
@@ -458,16 +530,16 @@ def run_audit() -> None:
         return f"{sum(scores)/len(scores):.4f}" if scores else "N/A"
 
     rows = [
-        ("MoE layers monitored",  report_a.num_layers,         report_b.num_layers,         report_c.num_layers),
-        ("Dead experts",          report_a.dead_experts_count,  report_b.dead_experts_count,  report_c.dead_experts_count),
-        ("Critical layers",       len(report_a.critical_layers),len(report_b.critical_layers),len(report_c.critical_layers)),
-        ("Starved experts",       len(report_a.gradient_starved_experts()), len(report_b.gradient_starved_experts()), len(report_c.gradient_starved_experts())),
-        ("Top layer risk",        _top_risk(report_a),         _top_risk(report_b),         _top_risk(report_c)),
-        ("Avg layer risk",        _avg_risk(report_a),         _avg_risk(report_b),         _avg_risk(report_c)),
+        ("MoE layers monitored",  report_a.num_layers,          report_b.num_layers,          report_c.num_layers,          report_d.num_layers),
+        ("Dead experts",          report_a.dead_experts_count,   report_b.dead_experts_count,   report_c.dead_experts_count,   report_d.dead_experts_count),
+        ("Critical layers",       len(report_a.critical_layers), len(report_b.critical_layers), len(report_c.critical_layers), len(report_d.critical_layers)),
+        ("Starved experts",       len(report_a.gradient_starved_experts()), len(report_b.gradient_starved_experts()), len(report_c.gradient_starved_experts()), len(report_d.gradient_starved_experts())),
+        ("Top layer risk",        _top_risk(report_a),          _top_risk(report_b),          _top_risk(report_c),          _top_risk(report_d)),
+        ("Avg layer risk",        _avg_risk(report_a),          _avg_risk(report_b),          _avg_risk(report_c),          _avg_risk(report_d)),
     ]
 
-    for label, a, b, c in rows:
-        print(f"  {label:<35}  {str(a):>12}  {str(b):>12}  {str(c):>12}")
+    for label, a, b, c, d in rows:
+        print(f"  {label:<35}  {str(a):>12}  {str(b):>12}  {str(c):>12}  {str(d):>12}")
 
     # ------------------------------------------------------------------
     # Serialisation demo
@@ -478,9 +550,10 @@ def run_audit() -> None:
 
     # JSON export for each scenario
     for name, report, fname in [
-        ("A (healthy)",  report_a, "deepseek_audit_A_healthy.json"),
-        ("B (partial)",  report_b, "deepseek_audit_B_partial.json"),
-        ("C (severe)",   report_c, "deepseek_audit_C_severe.json"),
+        ("A (healthy)",      report_a, "deepseek_audit_A_healthy.json"),
+        ("B (partial)",      report_b, "deepseek_audit_B_partial.json"),
+        ("C (severe)",       report_c, "deepseek_audit_C_severe.json"),
+        ("D (intervened)",   report_d, "deepseek_audit_D_intervened.json"),
     ]:
         report.to_json(fname)
         size_kb = os.path.getsize(fname) / 1024
@@ -508,7 +581,9 @@ def run_audit() -> None:
     # ------------------------------------------------------------------
     print(f"\n{'=' * 70}")
     print("  Audit complete.")
-    print("  MoEWatch successfully diagnosed all three checkpoint scenarios.")
+    print("  MoEWatch successfully diagnosed all four checkpoint scenarios.")
+    print("  Scenario D demonstrates the before/after effect of noise intervention")
+    print("  on a severely collapsed model — compare Avg risk C vs D above.")
     print("  Use report.to_json() to save results for CI/CD pipeline integration.")
     print(f"{'=' * 70}")
 
