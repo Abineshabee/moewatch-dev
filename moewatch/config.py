@@ -283,6 +283,17 @@ class WatchConfig:
 
     Overrides the ``NO_COLOR`` environment variable. MoEWatch also
     checks the environment automatically at import time. Default: False.
+
+    .. warning::
+        The ``NO_COLOR`` environment variable follows the
+        `no-color.org <https://no-color.org>`_ spec literally: presence
+        of *any* non-empty value disables color, regardless of its
+        content. This means ``NO_COLOR=0`` also disables color, even
+        though ``"0"`` commonly means "off"/"false" in other tools.
+        Only an unset variable or an empty/whitespace-only value leaves
+        color enabled. To force color back on in code, construct with
+        ``no_color=False`` -- but note the environment variable still
+        takes precedence over this field if set to a non-empty value.
     """
 
     router_modules: Optional[List[str]] = None
@@ -291,6 +302,10 @@ class WatchConfig:
     When set, ``detect_router_modules()`` uses only these name substrings
     instead of the built-in heuristics for Mixtral, Qwen3-MoE,
     DeepSeek-MoE, and OLMoE. Useful for custom architectures.
+    Must be a ``list`` of ``str`` (e.g. ``["gate", "router"]``) -- a
+    bare string such as ``"gate"`` is rejected at construction time,
+    since iterating over it character-by-character would silently
+    produce incorrect router detection.
     Default: None (auto-detect).
     """
 
@@ -410,6 +425,7 @@ class WatchConfig:
         - log_every >= 1, sample_every >= 1
         - policy_type in {"rule", "bandit"}
         - output is a valid OutputMode
+        - router_modules is None or a list of str
         - NO_COLOR env var respected
         """
         # Entropy thresholds
@@ -502,6 +518,21 @@ class WatchConfig:
             raise ValueError(
                 f"policy_type must be 'rule' or 'bandit', got '{self.policy_type}'"
             )
+
+        # Router modules — must be None or a list of str. A bare string
+        # is a common mistake (e.g. router_modules="gate" instead of
+        # router_modules=["gate"]) that would otherwise be accepted
+        # silently and then iterated character-by-character downstream
+        # in detect_router_modules(), producing incorrect router
+        # detection with no error raised anywhere.
+        if self.router_modules is not None:
+            if not isinstance(self.router_modules, list) or not all(
+                isinstance(item, str) for item in self.router_modules
+            ):
+                raise ValueError(
+                    f"router_modules must be None or a list of str, "
+                    f"got {self.router_modules!r}"
+                )
 
         # Output mode — coerce string to enum if passed as plain string
         if isinstance(self.output, str):
