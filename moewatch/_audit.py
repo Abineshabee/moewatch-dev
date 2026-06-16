@@ -80,7 +80,7 @@ def audit(
     num_batches: int = 100,
     config: Optional[WatchConfig] = None,
     device: str = "cpu",
-    with_backward: Optional[bool] = None,
+    with_backward: bool = True,
 ) -> "AuditReport":
     """Run offline diagnostic audit on a trained MoE model.
 
@@ -726,48 +726,62 @@ def _fuse_risk_scores(
 
             # Select the representative Tier 1 signal for this layer.
             #
-            # Naive max(starvation_score) fails when experts with zero
-            # gradient norms return starvation_score=0.0 due to the
-            # _MIN_SAMPLES_FOR_DETECTION guard — their score looks "healthy"
-            # but they are actually dead (insufficient hook events collected).
+            # Three expert categories (in priority order):
             #
-            # Fix: prefer experts with confirmed data (n_samples >= 1 AND
-            # norm_mean == 0) as truly dead; fall back to max starvation_score
-            # among experts that have data; only use the naive max as last resort.
+            #   1. confirmed_dead  — hook fired (n_samples >= 1) but norm=0.
+            #      These are experts that were selected in forward but produced
+            #      zero gradient.  starvation_score is already 1.0.
+            #
+            #   2. no_data        — hook NEVER fired (n_samples == 0).
+            #      After a backward pass, zero events means the expert's
+            #      weight never appeared in the computation graph → it was
+            #      never routed to → complete gradient starvation.
+            #      starvation_score defaults to 0.0 (insufficient-data guard
+            #      in GradientStarvationAnalyzer), so we override to 1.0 here.
+            #
+            #   3. has_data       — hook fired, norm > 0.  Take the worst
+            #      starvation_score among experts that have samples.
             grad_report = None
             if grad_layer_reports:
-                # 1st priority: experts with actual data showing zero norm
-                #   (truly dead — gradient hook fired but norm was 0.0)
                 confirmed_dead = [
                     r for r in grad_layer_reports
                     if getattr(r, "n_samples", 0) >= 1
                     and getattr(r, "gradient_norm_mean", -1.0) == 0.0
                 ]
+                no_data = [
+                    r for r in grad_layer_reports
+                    if getattr(r, "n_samples", 0) == 0
+                ]
+                has_data = [
+                    r for r in grad_layer_reports
+                    if getattr(r, "n_samples", 0) >= 1
+                    and getattr(r, "gradient_norm_mean", -1.0) != 0.0
+                ]
+
                 if confirmed_dead:
-                    # All confirmed-dead experts have starvation_score=1.0;
-                    # pick the one with the most samples for reliability.
+                    # Most reliable: hook fired, norm is exactly zero.
                     grad_report = max(
                         confirmed_dead,
                         key=lambda r: getattr(r, "n_samples", 0),
                     )
+                elif no_data:
+                    # No hook events → expert never routed to → fully starved.
+                    # Override starvation_score to 1.0 so the fuser sees
+                    # the correct T1 signal.
+                    import dataclasses as _dc
+                    _base = no_data[0]
+                    grad_report = _dc.replace(_base, starvation_score=1.0)
+                elif has_data:
+                    # All experts received gradients; pick the most starved.
+                    grad_report = max(
+                        has_data,
+                        key=lambda r: r.starvation_score,
+                    )
                 else:
-                    # 2nd priority: experts that have sufficient samples —
-                    # take the worst starvation score among those.
-                    has_data = [
-                        r for r in grad_layer_reports
-                        if getattr(r, "n_samples", 0) >= 1
-                    ]
-                    if has_data:
-                        grad_report = max(
-                            has_data,
-                            key=lambda r: r.starvation_score,
-                        )
-                    else:
-                        # Last resort: no hook events at all — use naive max.
-                        grad_report = max(
-                            grad_layer_reports,
-                            key=lambda r: r.starvation_score,
-                        )
+                    grad_report = max(
+                        grad_layer_reports,
+                        key=lambda r: r.starvation_score,
+                    )
 
             # Both Tier 1 and Tier 2 are required for meaningful fusion.
             # If either is missing, skip this layer rather than producing
