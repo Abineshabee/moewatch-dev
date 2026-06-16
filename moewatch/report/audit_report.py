@@ -61,7 +61,9 @@ from __future__ import annotations
 import datetime
 import json
 import logging
+import dataclasses
 from dataclasses import dataclass, field
+import numpy as np
 from typing import Any, Dict, List, Optional, Tuple
 
 from moewatch.analyzer.collapse import LayerCollapseReport
@@ -91,9 +93,24 @@ def _to_serializable(obj: Any) -> Any:
     Any
         A JSON-serialisable representation of ``obj``.
     """
+    # NumPy arrays — convert to nested Python lists.
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+
+    # NumPy scalars (np.float32, np.int64, etc.) — cast to Python native.
+    if isinstance(obj, np.generic):
+        return obj.item()
+
     # Dataclasses that expose to_dict() — use it for controlled serialisation.
     if hasattr(obj, "to_dict") and callable(obj.to_dict):
         return obj.to_dict()
+
+    # Generic dataclasses (e.g. LayerEntropyReport) — recurse field-by-field.
+    if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+        return {
+            f.name: _to_serializable(getattr(obj, f.name))
+            for f in dataclasses.fields(obj)
+        }
 
     # Enums — fall back to .value.
     if hasattr(obj, "value"):
