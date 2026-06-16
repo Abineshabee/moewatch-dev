@@ -1648,7 +1648,8 @@ class TestCLIReporter:
             step=1, level=AlertLevel.CRITICAL, layer_id="layers.0.gate",
             signal_type="entropy_drift", message="collapse imminent",
         )
-        result = reporter.render_alert(alert)
+        assert reporter.render_alert(alert) is None
+        result = reporter._render_alert_plain(alert)
         assert "0.gate" in result
         assert "collapse imminent" in result
 

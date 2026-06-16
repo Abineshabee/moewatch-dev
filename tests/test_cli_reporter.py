@@ -470,7 +470,9 @@ class TestRenderAlert:
             signal_type="entropy_drift",
             message="something happened",
         )
-        result = reporter.render_alert(alert)
+        # public API returns None (no REPL echo); content checked via private method
+        assert reporter.render_alert(alert) is None
+        result = reporter._render_alert_rich(alert)
         assert "0.gate" in result
         assert "something happened" in result
         assert level.value.upper() in result
@@ -490,7 +492,9 @@ class TestRenderAlert:
             signal_type="risk_score",
             message="plain alert message",
         )
-        result = reporter.render_alert(alert)
+        # public API returns None; content checked via private method
+        assert reporter.render_alert(alert) is None
+        result = reporter._render_alert_plain(alert)
         assert "1.gate" in result
         assert "plain alert message" in result
         assert "step=7" in result
@@ -503,7 +507,7 @@ class TestRenderAlert:
             step=1, level=AlertLevel.CRITICAL, layer_id="l0",
             signal_type="entropy_drift", message="msg",
         )
-        result = reporter.render_alert(alert)
+        result = reporter._render_alert_plain(alert)
         assert "\033[" not in result
 
     def test_render_alert_rich_no_color(self) -> None:
@@ -513,7 +517,7 @@ class TestRenderAlert:
             step=2, level=AlertLevel.WARNING, layer_id="l1",
             signal_type="load_imbalance", message="imbalance high",
         )
-        result = reporter.render_alert(alert)
+        result = reporter._render_alert_rich(alert)
         assert "l1" in result
         assert "imbalance high" in result
 

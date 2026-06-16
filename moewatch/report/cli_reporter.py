@@ -243,7 +243,7 @@ class CLIReporter:
             entropy_reports, collapse_reports, risk_reports,
         )
 
-    def render_alert(self, alert: Alert) -> str:
+    def render_alert(self, alert: Alert) -> None:
         """Format and print a single alert line to the terminal.
 
         Parameters
@@ -253,12 +253,14 @@ class CLIReporter:
 
         Returns
         -------
-        str
-            Formatted alert string.
+        None
+            Prints directly to the terminal. Returns None so that interactive
+            REPL sessions do not echo the formatted string as a second line.
         """
         if _RICH_AVAILABLE and self._console is not None:
-            return self._render_alert_rich(alert)
-        return self._render_alert_plain(alert)
+            self._render_alert_rich(alert)
+        else:
+            self._render_alert_plain(alert)
 
     # ------------------------------------------------------------------
     # Rich rendering -- single pass, single print
@@ -916,6 +918,7 @@ class CLIReporter:
             f"step={alert.step}  {_short_layer_name(alert.layer_id)}  "
             f"{alert.signal_type}  {alert.message}"
         )
+        print(line, file=sys.stdout)
         return line
 
 
