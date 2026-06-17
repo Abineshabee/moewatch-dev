@@ -110,6 +110,20 @@ class InterventionAction(ABC):
         ``config.intervention_max_delta``. ``0.0`` for actions with no
         scalar magnitude (e.g. :class:`NoOpAction`).
 
+    Class Attributes
+    -----------------
+    is_global_resource : bool, default=False
+        ``True`` for actions that mutate state shared across the whole
+        model (e.g. a single ``model.config`` field) rather than the
+        target layer's own submodule. :class:`~moewatch.intervention.engine.InterventionEngine`
+        uses this to ensure at most one such action is active *engine-wide*
+        at a time, regardless of which layer proposed it — otherwise two
+        layers could each hold an independent action against the same
+        underlying shared field, and one reverting to its own pre-apply
+        snapshot would silently erase the other's still-active
+        contribution. Subclasses that only ever touch their own
+        ``layer_name`` submodule (the common case) leave this ``False``.
+
     Attributes
     ----------
     action_type : str
@@ -132,6 +146,10 @@ class InterventionAction(ABC):
     :class:`~moewatch.intervention.engine.InterventionEngine`, which may
     call :meth:`revert` defensively during error handling.
     """
+
+    #: True for actions that mutate model-wide shared state rather than
+    #: their own layer's submodule. See class docstring.
+    is_global_resource: bool = False
 
     def __init__(self, action_type: str, layer_name: str, delta: float = 0.0) -> None:
         if not isinstance(layer_name, str) or not layer_name:
@@ -345,6 +363,10 @@ class AuxLossAction(InterventionAction):
     #: Candidate attribute names for the auxiliary loss coefficient,
     #: checked in order on ``trainer.model.config``.
     _COEF_ATTRS: tuple[str, ...] = ("aux_loss_coef", "router_aux_loss_coef")
+
+    #: aux_loss_coef lives on the shared model.config, not on this
+    #: action's own layer_name submodule — see InterventionAction.is_global_resource.
+    is_global_resource: bool = True
 
     def __init__(self, layer_name: str, delta: float = 0.05) -> None:
         if delta <= 0.0:

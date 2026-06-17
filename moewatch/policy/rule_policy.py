@@ -121,11 +121,11 @@ class RulePolicy(PolicyBase):
     Parameters
     ----------
     config : WatchConfig
-        Configuration. Currently used only for action-magnitude defaults
-        (``AuxLossAction``, ``RouterNoiseAction``, and
-        ``ExpertDropoutAction`` are constructed with their built-in
-        defaults; future versions may expose tunable deltas via
-        :class:`WatchConfig`).
+        Configuration. ``config.intervention_max_delta`` caps the
+        magnitude of every constructed action (``AuxLossAction``,
+        ``RouterNoiseAction``, ``ExpertDropoutAction``); each action's
+        built-in default magnitude is used unless it would exceed this
+        cap, in which case it is clamped down to it.
 
     Attributes
     ----------
@@ -192,8 +192,9 @@ class RulePolicy(PolicyBase):
            the candidate to the next-weaker tier.
         4. Construct and return the corresponding
            :class:`~moewatch.intervention.actions.InterventionAction`
-           subclass with sensible default magnitudes, targeting
-           ``layer_name``.
+           subclass, with magnitude capped to
+           ``config.intervention_max_delta`` (see :meth:`_build_action`),
+           targeting ``layer_name``.
         5. Record the *candidate* (pre-downgrade) action type in
            :attr:`_action_sequence` for diagnostics, and append the
            *final* (post-downgrade) action type to
@@ -234,7 +235,9 @@ class RulePolicy(PolicyBase):
                 final_action_type,
             )
 
-        return self._build_action(final_action_type, layer_name)
+        return self._build_action(
+            final_action_type, layer_name, max_delta=self.config.intervention_max_delta
+        )
 
     def update(
         self, state: PolicyState, action: InterventionAction, reward: float
@@ -437,7 +440,11 @@ class RulePolicy(PolicyBase):
         return candidate
 
     @staticmethod
-    def _build_action(action_type: str, layer_name: str) -> InterventionAction:
+    def _build_action(
+        action_type: str,
+        layer_name: str,
+        max_delta: "float | None" = None,
+    ) -> InterventionAction:
         """Construct the :class:`InterventionAction` for ``action_type``.
 
         Parameters
@@ -447,17 +454,44 @@ class RulePolicy(PolicyBase):
             ``"expert_dropout"``.
         layer_name : str
             Target layer name passed to the action's constructor.
+        max_delta : float or None, default=None
+            Upper bound on the constructed action's magnitude, normally
+            ``config.intervention_max_delta``. Each action type's
+            built-in default magnitude (``0.05`` for
+            :class:`~moewatch.intervention.actions.AuxLossAction``,
+            ``0.1`` for :class:`~moewatch.intervention.actions.RouterNoiseAction`
+            and :class:`~moewatch.intervention.actions.ExpertDropoutAction`)
+            is capped to ``max_delta`` when it would otherwise exceed it.
+            If ``None``, the built-in defaults are used unmodified — kept
+            for backward-compatible direct calls that don't have a config
+            to consult.
 
         Returns
         -------
         InterventionAction
-            A freshly constructed action instance with default magnitude
-            parameters.
+            A freshly constructed action instance with magnitude
+            parameters that respect ``max_delta``.
+
+        Notes
+        -----
+        Without this clamp, :class:`~moewatch.intervention.safety.SafetyGuard`'s
+        delta-limit check would compare the action's hardcoded default
+        magnitude against ``config.intervention_max_delta`` and, whenever
+        the configured cap is tighter than the default (e.g. a fine-tuning
+        config that sets ``intervention_max_delta=0.01``), *every* non-NoOp
+        action would be downgraded to a NoOp regardless of risk score —
+        silently disabling the entire intervention system. Clamping here
+        ensures ``intervention_max_delta`` actually controls the applied
+        magnitude instead of being a hard veto.
         """
+
+        def _capped(default: float) -> float:
+            return min(default, max_delta) if max_delta is not None else default
+
         if action_type == "aux_loss":
-            return AuxLossAction(layer_name=layer_name)
+            return AuxLossAction(layer_name=layer_name, delta=_capped(0.05))
         if action_type == "router_noise":
-            return RouterNoiseAction(layer_name=layer_name)
+            return RouterNoiseAction(layer_name=layer_name, noise_scale=_capped(0.1))
         if action_type == "expert_dropout":
-            return ExpertDropoutAction(layer_name=layer_name)
+            return ExpertDropoutAction(layer_name=layer_name, dropout_delta=_capped(0.1))
         return NoOpAction(layer_name=layer_name)

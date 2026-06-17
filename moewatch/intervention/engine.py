@@ -192,6 +192,18 @@ class InterventionEngine:
         to :class:`~moewatch.intervention.actions.NoOpAction` regardless of
         :class:`SafetyGuard`'s verdict — at most one intervention is active
         per layer at a time.
+
+        Separately, if ``action.is_global_resource`` is ``True`` (e.g.
+        :class:`~moewatch.intervention.actions.AuxLossAction`, which
+        mutates a single shared ``model.config`` field rather than its
+        own layer's submodule) and a *different* layer already has an
+        active intervention of the same ``action_type``, the proposed
+        action is likewise downgraded to NoOp — even though the two
+        layers are otherwise unrelated, allowing both to be active
+        simultaneously would mean two independent actions mutating the
+        same underlying field, each tracking its own pre-apply snapshot;
+        whichever reverts first would restore the field to *its* snapshot
+        and silently erase the other's still-active contribution.
         """
         action.mark_applied(step)
 
@@ -217,6 +229,36 @@ class InterventionEngine:
             downgraded = NoOpAction(layer_name=action.layer_name)
             downgraded.mark_applied(step)
             return downgraded
+
+        if not isinstance(action, NoOpAction) and action.is_global_resource:
+            conflicting_layer = self._find_conflicting_global_intervention(action)
+            if conflicting_layer is not None:
+                logger.info(
+                    "[MoEWatch] InterventionEngine: '%s' on layer '%s' "
+                    "targets a global resource already controlled by an "
+                    "active '%s' intervention on layer '%s'; downgrading "
+                    "to NoOp to avoid corrupting the shared field.",
+                    action.action_type,
+                    action.layer_name,
+                    action.action_type,
+                    conflicting_layer,
+                )
+                reason = (
+                    f"global resource for '{action.action_type}' already "
+                    f"has an active intervention on layer '{conflicting_layer}'"
+                )
+                self._intervention_log.append(
+                    {
+                        "event": "downgraded",
+                        "step": step,
+                        "layer": action.layer_name,
+                        "reason": reason,
+                        "original_action": action.action_type,
+                    }
+                )
+                downgraded = NoOpAction(layer_name=action.layer_name)
+                downgraded.mark_applied(step)
+                return downgraded
 
         result = self.safety_guard.check(action, current_loss, risk_scores, layer_order)
 
@@ -458,6 +500,38 @@ class InterventionEngine:
             self._active_interventions.pop(layer_name, None)
             self._observation_windows.pop(layer_name, None)
             self._pending_states.pop(layer_name, None)
+
+    def _find_conflicting_global_intervention(
+        self, action: InterventionAction
+    ) -> "str | None":
+        """Find another layer with an active intervention of the same type.
+
+        Parameters
+        ----------
+        action : InterventionAction
+            Proposed action, with ``action.is_global_resource is True``.
+
+        Returns
+        -------
+        str or None
+            The ``layer_name`` of another layer currently holding an
+            active intervention with the same ``action_type`` as
+            ``action``, or ``None`` if no such conflict exists.
+
+        Notes
+        -----
+        Only relevant for actions that mutate shared/global model state
+        (see :attr:`InterventionAction.is_global_resource`). Per-layer
+        actions never conflict this way, since each targets its own
+        distinct submodule.
+        """
+        for other_layer, (other_action, _) in self._active_interventions.items():
+            if (
+                other_layer != action.layer_name
+                and other_action.action_type == action.action_type
+            ):
+                return other_layer
+        return None
 
     # ------------------------------------------------------------------
     # Internal helpers
