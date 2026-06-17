@@ -243,14 +243,18 @@ class FakeDeepSeekModel(nn.Module):
         """Concentrate routing toward a subset of experts.
 
         Simulates mid-training partial collapse where top_experts
-        receive most of the token load.
+        receive most of the token load.  Non-dominant experts are
+        zeroed so that top-6 routing consistently selects from the
+        dominant pool, making the collapse signal detectable.
         """
         with torch.no_grad():
             for i in self._moe_layer_indices:
                 gate = self.layers[i].mlp.gate
-                gate.weight.normal_(0, 0.02)
-                # Boost the top experts' output weights
-                gate.weight[:top_experts] += 2.5
+                gate.weight.zero_()
+                # Heavily bias the dominant experts; small noise breaks ties
+                gate.weight[:top_experts] = (
+                    4.0 + torch.randn(top_experts, gate.weight.shape[1]) * 0.05
+                )
 
     def set_severe_collapse(self, dominant_expert: int = 0) -> None:
         """Route nearly all tokens to a single expert.

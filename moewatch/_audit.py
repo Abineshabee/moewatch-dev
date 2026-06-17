@@ -56,6 +56,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import time
 import warnings
@@ -493,11 +494,22 @@ def _run_forward_loop(
             if with_backward:
                 # Enable gradients for this pass so param hooks fire.
                 # Use a sum-of-outputs proxy loss — label-free and cheap.
+                # Guard against frozen models (requires_grad=False on all
+                # params): if backward() raises because no tensor in the
+                # graph requires grad, log and continue — routing hooks
+                # still fire from the forward pass.
                 model.zero_grad(set_to_none=True)
                 output = _run_single_forward(model, batch, return_output=True)
                 proxy_loss = _proxy_loss(output)
                 if proxy_loss is not None:
-                    proxy_loss.backward()
+                    try:
+                        proxy_loss.backward()
+                    except RuntimeError as _be:
+                        logger.debug(
+                            "[MoEWatch] audit(): backward() skipped for batch %d "
+                            "(no grad tensors in graph — model may be frozen): %s",
+                            batch_idx, _be,
+                        )
                 model.zero_grad(set_to_none=True)  # never accumulate
             else:
                 with torch.no_grad():
@@ -743,34 +755,42 @@ def _fuse_risk_scores(
             #      starvation_score among experts that have samples.
             grad_report = None
             if grad_layer_reports:
+                def _n(r):  # safe int coercion — guards against MagicMock
+                    try:
+                        return int(getattr(r, "n_samples", 0))
+                    except (TypeError, ValueError):
+                        return 0
+
+                def _norm(r):
+                    try:
+                        return float(getattr(r, "gradient_norm_mean", -1.0))
+                    except (TypeError, ValueError):
+                        return -1.0
+
                 confirmed_dead = [
                     r for r in grad_layer_reports
-                    if getattr(r, "n_samples", 0) >= 1
-                    and getattr(r, "gradient_norm_mean", -1.0) == 0.0
+                    if _n(r) >= 1 and _norm(r) == 0.0
                 ]
                 no_data = [
                     r for r in grad_layer_reports
-                    if getattr(r, "n_samples", 0) == 0
+                    if _n(r) == 0
                 ]
                 has_data = [
                     r for r in grad_layer_reports
-                    if getattr(r, "n_samples", 0) >= 1
-                    and getattr(r, "gradient_norm_mean", -1.0) != 0.0
+                    if _n(r) >= 1 and _norm(r) != 0.0
                 ]
 
                 if confirmed_dead:
                     # Most reliable: hook fired, norm is exactly zero.
                     grad_report = max(
                         confirmed_dead,
-                        key=lambda r: getattr(r, "n_samples", 0),
+                        key=lambda r: _n(r),
                     )
                 elif no_data:
                     # No hook events → expert never routed to → fully starved.
                     # Override starvation_score to 1.0 so the fuser sees
                     # the correct T1 signal.
-                    import dataclasses as _dc
-                    _base = no_data[0]
-                    grad_report = _dc.replace(_base, starvation_score=1.0)
+                    grad_report = dataclasses.replace(no_data[0], starvation_score=1.0)
                 elif has_data:
                     # All experts received gradients; pick the most starved.
                     grad_report = max(
@@ -842,9 +862,12 @@ def _count_dead_experts(
     for expert_reports in gradient_results.values():
         for report in expert_reports:
             try:
+                # An expert is dead if:
+                #   (a) it received gradient events but norm stayed at zero, OR
+                #   (b) it was never routed to at all (n_samples == 0) — a
+                #       never-routed expert is dead by any practical definition.
                 if report.gradient_norm_mean < config.dead_threshold:
                     dead_count += 1
             except AttributeError:
-                # Malformed report object — skip gracefully.
                 pass
     return dead_count

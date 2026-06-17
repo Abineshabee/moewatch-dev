@@ -367,14 +367,10 @@ class AuditReport:
             lines.append("  No critical layers detected.")
         lines.append("")
 
-        # Dead experts
-        dead = self.dead_experts()
+        # Dead experts — count from gradient starvation analysis (gradient_norm_mean
+        # < dead_threshold), which covers both confirmed-dead (hook fired, norm=0)
+        # and never-routed experts (n_samples=0, never appeared in computation graph).
         lines.append(f"  Dead experts : {self.dead_experts_count}")
-        if dead:
-            for layer_name, eid in dead[:10]:  # cap display at 10
-                lines.append(f"    — expert {eid:>3d}  in  {layer_name}")
-            if len(dead) > 10:
-                lines.append(f"    ... and {len(dead) - 10} more")
         lines.append("")
 
         # Gradient starvation summary
