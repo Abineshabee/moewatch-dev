@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from unittest.mock import MagicMock
 
 from moewatch import MoEWatch, MoEWatchCallback
@@ -274,9 +275,17 @@ def make_finetune_config() -> WatchConfig:
         load_imbalance_warn=3.0,
         load_imbalance_error=6.0,
 
-        # Expert health
-        dead_threshold=0.008,
-        cold_threshold=0.04,
+        # Expert health — thresholds calibrated for THIS toy model's actual
+        # gradient scale (HIDDEN_DIM=64, batch=2, seq=32), not real Qwen3-7B
+        # scale. Measured empirically: an expert actually receiving tokens
+        # has grad_norm roughly in [0.0006, 0.02] across warm-up/specialise/
+        # collapse/recovery; an expert receiving NO tokens has grad_norm
+        # exactly 0. dead_threshold sits below the smallest observed active
+        # value (so truly-unrouted experts are caught, not low-but-real
+        # ones); cold_threshold sits below the typical active median so
+        # healthy experts don't spend many consecutive steps under it.
+        dead_threshold=0.0004,
+        cold_threshold=0.0015,
         cold_steps_limit=15,        # faster escalation in fine-tune
 
         # Sampling — fine-tune runs are short, collect everything
@@ -369,9 +378,10 @@ def run_finetune_simulation() -> None:
         watcher.pre_step(step)
 
         input_ids = torch.randint(0, 1000, (2, 32))  # batch=2, seq=32
+        labels    = torch.randint(0, 1000, (2, 32))  # next-token targets (synthetic)
         optimizer.zero_grad()
         logits = model(input_ids)
-        loss   = logits.mean()
+        loss   = F.cross_entropy(logits.reshape(-1, logits.size(-1)), labels.reshape(-1))
         loss.backward()
         optimizer.step()
 
