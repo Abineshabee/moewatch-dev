@@ -269,6 +269,15 @@ class HookManager:
           sampling decision (``global_step % config.sample_every == 0``)
           against the correct step.
 
+        Before advancing the step counter, this method calls
+        :meth:`flush_missing_gradient_events` for the *previous* step so
+        that any expert whose backward hook did not fire (because it
+        received zero tokens and therefore had no gradient path) gets an
+        explicit zero-norm :class:`GradientEvent` written into its buffer.
+        Without this, a dead expert's buffer goes stale — it retains old
+        healthy-looking norms from before collapse — and the
+        gradient-starvation analyzer never detects the silence.
+
         Parameters
         ----------
         global_step : int
@@ -278,10 +287,93 @@ class HookManager:
         -------
         None
         """
+        # Flush zero-norm events for experts that were silent during the
+        # step we are leaving. Must happen BEFORE we advance _global_step
+        # on each hook, so flush logic can compare against the old step.
+        if self._gradient_hooks:
+            prev_step = self._gradient_hooks[0]._global_step
+            if prev_step > 0:  # skip the initial dummy step-0 flush
+                self.flush_missing_gradient_events(prev_step)
+
         for hook in self._router_hooks:
             hook.set_global_step(global_step)
         for hook in self._gradient_hooks:
             hook.set_global_step(global_step)
+
+    def flush_missing_gradient_events(self, step: int) -> None:
+        """Write zero-norm gradient events for experts silent this step.
+
+        PyTorch only invokes a ``register_hook`` callback when a gradient
+        actually flows through the tensor. If an expert received zero
+        tokens in this step its weight has no backward edge and the hook
+        is simply never called — not called with a zero gradient, just
+        never called. Without intervention the expert's gradient buffer
+        goes stale, retaining the last real norms from before it stopped
+        being used, so ``norm_mean`` stays high and starvation is never
+        detected.
+
+        This method closes that gap: for every registered
+        :class:`GradientStarvationHook` whose ``last_fired_step`` is not
+        equal to ``step``, we synthesize a
+        :class:`~moewatch.hooks.gradient_hook.GradientEvent` with
+        ``gradient_norm = 0.0`` and write it to the stat collector. This
+        keeps the rolling window current and lets the analyzer see the
+        silence immediately.
+
+        Sampling awareness
+        ------------------
+        Zero-stamping only happens on steps that would have been sampled
+        (``step % config.sample_every == 0``). On non-sampled steps the
+        hook is intentionally silent for ALL experts — healthy or dead —
+        so no zero-stamp should be written (it would incorrectly penalize
+        healthy experts that weren't sampled this step).
+
+        Parameters
+        ----------
+        step : int
+            The training step number just completed (i.e. the step whose
+            backward pass has finished).
+
+        Returns
+        -------
+        None
+        """
+        sample_every = max(1, self.config.sample_every)
+        if step % sample_every != 0:
+            # Non-sampled step — hooks are intentionally silent for everyone.
+            return
+
+        import time as _time
+        from moewatch.hooks.gradient_hook import GradientEvent
+
+        for hook in self._gradient_hooks:
+            if hook.last_fired_step == step:
+                # This expert fired normally this step — nothing to do.
+                continue
+
+            # Expert was silent this step on a sampled step → dead/starved.
+            # Write an explicit zero-norm event so the rolling window stays
+            # current and the starvation analyzer sees the silence.
+            try:
+                event = GradientEvent(
+                    timestamp=_time.time(),
+                    global_step=step,
+                    layer_name=hook.layer_name,
+                    expert_id=hook.expert_id,
+                    gradient_norm=0.0,
+                    gradient_magnitude=0.0,
+                )
+                self.stat_collector.write_gradient_event(event)
+            except Exception as exc:  # pylint: disable=broad-except
+                logger.debug(
+                    "[MoEWatch] flush_missing_gradient_events: failed to "
+                    "write zero-norm event for ('%s', expert=%d) at "
+                    "step=%d: %s",
+                    hook.layer_name,
+                    hook.expert_id,
+                    step,
+                    exc,
+                )
 
     # ------------------------------------------------------------------
     # Query interface

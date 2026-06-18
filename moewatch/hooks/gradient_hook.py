@@ -161,6 +161,7 @@ class GradientStarvationHook:
         "stat_collector",
         "config",
         "_global_step",
+        "last_fired_step",
     )
 
     def __init__(
@@ -177,6 +178,12 @@ class GradientStarvationHook:
 
         # Updated externally (by HookManager) once per training step.
         self._global_step: int = 0
+
+        # Tracks the last step this hook actually fired (i.e. wrote an event).
+        # Used by HookManager.flush_missing_gradient_events() to detect experts
+        # that received zero tokens this step and need a zero-norm stamp.
+        # None means the hook has never fired.
+        self.last_fired_step: Optional[int] = None
 
     # ------------------------------------------------------------------
     # Hook entry point
@@ -231,6 +238,9 @@ class GradientStarvationHook:
             )
 
             self.stat_collector.write_gradient_event(event)
+            # Record that this hook successfully fired for this step so
+            # HookManager.flush_missing_gradient_events() can skip it.
+            self.last_fired_step = self._global_step
 
         except Exception as exc:  # pylint: disable=broad-except
             logger.debug(

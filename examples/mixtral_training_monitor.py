@@ -16,9 +16,9 @@
 #                layers, each containing a sparse MoE block with 8 experts
 #                and top-2 routing. Training goes through three phases:
 #
-#                  Phase 1  (steps  1–30)  — Healthy uniform routing
-#                  Phase 2  (steps 31–70)  — Entropy collapse pressure builds
-#                  Phase 3  (steps 71–100) — Recovery after intervention
+#                  Phase 1  (steps   1–30)  — Healthy uniform routing
+#                  Phase 2  (steps  31–90)  — Entropy collapse pressure builds
+#                  Phase 3  (steps  91–160) — Recovery after intervention
 #
 #                Demonstrates:
 #                  • MoEWatchCallback integration with HuggingFace Trainer
@@ -42,6 +42,7 @@ from __future__ import annotations
 import time
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from unittest.mock import MagicMock
 
 from moewatch import MoEWatch, MoEWatchCallback
@@ -202,26 +203,43 @@ def run_simulation() -> None:
     config = WatchConfig(
         output=OutputMode.SILENT,         # Suppress CLI dashboard/alerts
 
-        # Signal thresholds — tighter than defaults for large MoE
-        entropy_warn=0.45,
-        entropy_critical=0.20,
-        entropy_drop_warn=0.08,
-        load_imbalance_warn=2.5,
-        load_imbalance_error=5.0,
-        dead_threshold=0.01,
-        cold_threshold=0.05,
+        # Entropy thresholds — Mixtral 8x7B with top-2 routing naturally
+        # produces lower per-layer entropy than top-8 models; keep warn
+        # tight but don't saturate on healthy uniform routing.
+        entropy_warn=0.50,
+        entropy_critical=0.25,
+        entropy_drop_warn=0.06,
+
+        # Load imbalance — top-2 out of 8 experts means even healthy
+        # routing shows some imbalance; set error threshold high enough
+        # to avoid false positives during warm-up.
+        load_imbalance_warn=3.0,
+        load_imbalance_error=6.0,
+
+        # Expert health thresholds — calibrated to the actual gradient
+        # norm range observed in this simulation (~0.004–0.04 for active
+        # experts at random init). The previous values (dead=0.01,
+        # cold=0.05) were above the typical warm-up norm floor, causing
+        # every expert to look cold/dead from step 1 and saturating risk
+        # at 0.67+ before any real collapse was injected.
+        #   dead_threshold  — below the smallest norm seen on an active
+        #                     expert after warm-up (~0.003 observed)
+        #   cold_threshold  — below the typical active median (~0.01)
+        dead_threshold=0.0005,
+        cold_threshold=0.002,
         cold_steps_limit=20,
 
-        # Sampling — balance coverage vs overhead
+        # Sampling — sample every step so zero-stamp flush fires promptly;
+        # log_every=10 keeps console output manageable.
         log_every=10,
-        sample_every=5,
+        sample_every=1,
 
         # Interventions enabled with safety guardrails
         intervention_enabled=True,
         policy_type="rule",
         intervention_cooldown=15,
-        intervention_max_delta=0.15,
-        loss_guard_threshold=1.8,
+        intervention_max_delta=0.05,
+        loss_guard_threshold=2.0,
 
         # Reward/baseline for bandit readiness
         reward_window_steps=20,
@@ -249,22 +267,30 @@ def run_simulation() -> None:
     # ------------------------------------------------------------------
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
-    total_steps = 100
+    total_steps = 160
 
     for step in range(1, total_steps + 1):
         # ---- Phase control ----
+        #
+        # Phase 1 (steps  1–30):  healthy warm-up — uniform routing
+        # Phase 2 (steps 31–90):  progressive collapse — pressure 0 → 6.0
+        #                         over 60 steps; stronger ramp gives risk
+        #                         time to cross the 0.3 intervention threshold
+        # Phase 3 (steps 91–160): partial recovery — pressure 6.0 → 1.0
+        #                         over 70 steps; interventions should fire
+        #                         and aux_coef should escalate
         if step <= 30:
             # Phase 1: healthy, uniform routing
             model.reset_routing()
             phase_tag = "healthy"
-        elif step <= 70:
-            # Phase 2: progressive collapse pressure (0 → 4.0 over 40 steps)
-            pressure = (step - 30) / 40 * 4.0
+        elif step <= 90:
+            # Phase 2: progressive collapse pressure (0 → 6.0 over 60 steps)
+            pressure = (step - 30) / 60 * 6.0
             model.set_collapse_pressure(pressure)
             phase_tag = f"collapsing (p={pressure:.2f})"
         else:
-            # Phase 3: partial recovery (pressure 4.0 → 1.0 over 30 steps)
-            pressure = 4.0 - (step - 70) / 30 * 3.0
+            # Phase 3: partial recovery (pressure 6.0 → 1.0 over 70 steps)
+            pressure = 6.0 - (step - 90) / 70 * 5.0
             model.set_collapse_pressure(max(pressure, 1.0))
             phase_tag = f"recovering (p={max(pressure, 1.0):.2f})"
 
@@ -272,9 +298,13 @@ def run_simulation() -> None:
         watcher.pre_step(step)
 
         input_ids = torch.randint(0, 1000, (2, 16))   # batch=2, seq=16
+        labels    = torch.randint(0, 1000, (2, 16))   # next-token targets
         optimizer.zero_grad()
-        logits = model(input_ids)
-        loss   = logits.mean()                         # dummy loss
+        logits = model(input_ids)                      # (B, S, vocab)
+        loss   = F.cross_entropy(
+            logits.reshape(-1, logits.size(-1)),
+            labels.reshape(-1),
+        )
         loss.backward()
         optimizer.step()
 
