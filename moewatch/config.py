@@ -190,20 +190,20 @@ class WatchConfig:
     # SIGNAL THRESHOLDS
     # ------------------------------------------------------------------
 
-    dead_threshold: float = 0.01
+    dead_threshold: float = 0.5
     """Gradient norm below this value → expert classified as DEAD.
 
     An expert is considered permanently dead when its gradient L2 norm
     falls below this threshold for ``cold_steps_limit`` consecutive steps.
-    Default: 0.01.
+    Default: 0.5 (calibrated for models with HIDDEN_DIM=64, top-k routing).
     """
 
-    cold_threshold: float = 0.05
+    cold_threshold: float = 1.0
     """Gradient norm below this value → expert classified as COLD.
 
     Cold is the precursor state before DEAD. An expert that stays cold
     for ``cold_steps_limit`` steps is promoted to DEAD.
-    Must be greater than ``dead_threshold``. Default: 0.05.
+    Must be greater than ``dead_threshold``. Default: 1.0 (calibrated for models with HIDDEN_DIM=64, top-k routing).
     """
 
     cold_steps_limit: int = 50

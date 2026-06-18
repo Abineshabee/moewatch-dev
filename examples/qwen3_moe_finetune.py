@@ -109,11 +109,6 @@ class Qwen3MoEBlock(nn.Module):
 
         # MoEWatch auto-detects 'gate' by leaf name heuristic.
         self.gate = nn.Linear(hidden_dim, num_experts, bias=False)
-        # Expose top_k on the gate module so MoEWatch's RouterForwardHook
-        # can infer the correct number of experts per token via _infer_top_k().
-        # Without this, the hook falls back to top_k=1 (argmax), producing
-        # artificially extreme load imbalance ratios on every step.
-        self.gate.top_k = top_k
 
         # Expert feed-forwards — SwiGLU-style (simplified to two linears).
         self.experts = nn.ModuleList([
@@ -281,18 +276,17 @@ def make_finetune_config() -> WatchConfig:
         load_imbalance_error=6.0,
 
         # Expert health — thresholds calibrated for THIS toy model's actual
-        # gradient scale (HIDDEN_DIM=64, batch=2, seq=32).
-        #
-        # Measured expert first-param grad norms:
-        #   Routed expert     : norm ~ 2.0 – 15.0  (receives tokens each step)
-        #   Unrouted expert   : norm = 0.0          (synthetic zero written by hook)
-        #
-        # dead_threshold must sit between 0.0 (synthetic zero) and ~2.0 (min active).
-        # cold_threshold must sit below the typical active floor (~2.0) so that
-        # only persistently-underloaded experts accumulate cold_steps.
-        dead_threshold=0.5,     # < min active norm of ~2.0; catches truly unrouted
-        cold_threshold=1.0,     # below active floor; sporadically-routed experts
-        cold_steps_limit=15,    # faster escalation in fine-tune
+        # gradient scale (HIDDEN_DIM=64, batch=2, seq=32), not real Qwen3-7B
+        # scale. Measured empirically: an expert actually receiving tokens
+        # has grad_norm roughly in [2.0, 15.0] across warm-up/specialise/
+        # collapse/recovery; an expert receiving NO tokens has grad_norm
+        # exactly 0. dead_threshold=0.5 sits in the gap between 0.0 (truly
+        # unrouted) and 2.0 (minimum active), catching only true dead experts;
+        # cold_threshold=1.0 sits below the healthy median so only genuinely
+        # struggling experts are flagged as cold without noise.
+        dead_threshold=0.5,
+        cold_threshold=1.0,
+        cold_steps_limit=15,        # faster escalation in fine-tune
 
         # Sampling — fine-tune runs are short, collect everything
         log_every=10,
@@ -349,95 +343,76 @@ def run_finetune_simulation() -> None:
         "warm_up": [], "specialisation": [], "collapse": [], "recovery": []
     }
 
+    # Save healthy gate weights at recovery boundary for controlled blending
+    healthy_gate_weights = {}  # {layer_name: weight_tensor}
+
     for step in range(1, total_steps + 1):
 
         # ---- Phase routing injection ----
-        # Routing weights are set ONCE at each phase boundary, not every step.
-        # Resetting every step would show a different distribution on each
-        # forward pass, causing false load-imbalance alerts during warm-up
-        # and preventing MoEWatch from accumulating consistent statistics.
-        if step == 1:
-            # Phase 1 boundary: healthy uniform routing
-            model.set_healthy_routing()
-
-        elif step == 21:
-            # Phase 2 boundary: mild specialisation begins
-            model.set_task_specialisation(n_dominant=52, boost=1.5)
-
-        elif step == 31:
-            model.set_task_specialisation(n_dominant=40, boost=1.5)
-
-        elif step == 41:
-            model.set_task_specialisation(n_dominant=28, boost=1.5)
-
-        elif step == 51:
-            model.set_task_specialisation(n_dominant=16, boost=1.5)
-
-        elif step == 61:
-            # Phase 3 boundary: severe collapse
-            model.set_collapse_pressure(n_dominant=4, boost=4.0)
-
-        elif step == 91:
-            # Phase 4 boundary: reset to healthy then add mild perturbation.
-            # Do this ONCE — never accumulate noise across steps, which would
-            # create increasingly extreme weights that look like collapse.
-            model.set_healthy_routing()
-            with torch.no_grad():
-                for layer in model.layers:
-                    layer.mlp.gate.weight.data.add_(
-                        torch.randn_like(layer.mlp.gate.weight) * 0.15
-                    )
-            # Flush stale collapse-era routing events from the stat_collector
-            # ring buffers. Without this, the window=100 buffer still holds
-            # 30 steps of collapse-era data, dragging risk up during recovery.
-            for buf in watcher.hook_manager.stat_collector._routing_buffers.values():
-                buf.clear()
-
-        elif step == 101:
-            # Second recovery checkpoint: reduce residual noise
-            model.set_healthy_routing()
-            with torch.no_grad():
-                for layer in model.layers:
-                    layer.mlp.gate.weight.data.add_(
-                        torch.randn_like(layer.mlp.gate.weight) * 0.08
-                    )
-
-        elif step == 111:
-            # Final recovery checkpoint: near-healthy routing
-            model.set_healthy_routing()
-            with torch.no_grad():
-                for layer in model.layers:
-                    layer.mlp.gate.weight.data.add_(
-                        torch.randn_like(layer.mlp.gate.weight) * 0.03
-                    )
-
-        # Derive phase label from current step (no routing change needed)
         if step <= 20:
-            phase_tag = "warm-up (uniform)"
-            phase_key = "warm_up"
-        elif step <= 30:
-            phase_tag = "specialising (52 dominant)"
-            phase_key = "specialisation"
-        elif step <= 40:
-            phase_tag = "specialising (40 dominant)"
-            phase_key = "specialisation"
-        elif step <= 50:
-            phase_tag = "specialising (28 dominant)"
-            phase_key = "specialisation"
+            model.set_healthy_routing()
+            phase_tag  = "warm-up (uniform)"
+            phase_key  = "warm_up"
+
         elif step <= 60:
-            phase_tag = "specialising (16 dominant)"
+            # Progressive specialisation: dominant pool shrinks 64 → 16 experts
+            n_dom = max(16, 64 - int((step - 20) / 40 * 48))
+            model.set_task_specialisation(n_dominant=n_dom, boost=1.5)
+            phase_tag = f"specialising ({n_dom} dominant)"
             phase_key = "specialisation"
+
         elif step <= 90:
+            # Severe collapse: 4 experts monopolise all routing
+            model.set_collapse_pressure(n_dominant=4, boost=4.0)
             phase_tag = "collapsing (4-expert monopoly)"
             phase_key = "collapse"
-        elif step <= 100:
-            phase_tag = "recovering (33%)"
-            phase_key = "recovery"
-        elif step <= 110:
-            phase_tag = "recovering (67%)"
-            phase_key = "recovery"
+
         else:
-            phase_tag = "recovering (100%)"
+            # ---- Recovery phase: controlled weight blending toward uniform ----
+            if step == 91:
+                # STEP 1: Clear stale collapse-era routing/gradient events
+                # This prevents collapse-phase data from contaminating recovery
+                # risk calculations. With a 100-step ring buffer, 30 steps of
+                # collapse data were still averaging with new recovery data.
+                for buf in watcher.stat_collector._routing_buffers.values():
+                    buf.clear()
+                for expert_buffers in watcher.stat_collector._gradient_buffers.values():
+                    for buf in expert_buffers.values():
+                        buf.clear()
+
+                # STEP 2: Save current (collapsed) gate weights as baseline.
+                # We will blend FROM these weights TOWARD uniform initialization.
+                for i, layer in enumerate(model.layers):
+                    layer_name = f"layers.{i}.mlp.gate"
+                    healthy_gate_weights[layer_name] = layer.mlp.gate.weight.data.clone()
+
+                # STEP 3: Reinitialize all gate weights to uniform (healthy state)
+                # This provides the target state for blending back.
+                with torch.no_grad():
+                    for layer in model.layers:
+                        layer.mlp.gate.weight.data.normal_(0, 0.02)
+
+            # RECOVERY: Blend from uniform initialization back toward learned state.
+            # As α increases (0 → 1), we move from uniform → learned weights.
+            # The interventions (aux_loss_coef changes) drive the learned state
+            # to be non-collapsing, so this blending supports recovery.
+            blend_factor = (step - 91) / 29  # 0 at step 91, ~1 at step 120
+            blend_factor = min(blend_factor, 1.0)  # Clamp to [0, 1]
+
+            with torch.no_grad():
+                for i, layer in enumerate(model.layers):
+                    layer_name = f"layers.{i}.mlp.gate"
+                    # Blend: w_t = (1 - α) * healthy + α * learned
+                    # α=0: pure uniform (safe)
+                    # α=1: back to learned (converged)
+                    healthy = healthy_gate_weights.get(layer_name)
+                    if healthy is not None:
+                        current = layer.mlp.gate.weight.data
+                        blended = (1 - blend_factor) * healthy + blend_factor * current
+                        layer.mlp.gate.weight.data.copy_(blended)
+
+            blend_pct = int(blend_factor * 100)
+            phase_tag = f"recovering ({blend_pct}% learned)"
             phase_key = "recovery"
 
         # ---- Forward + backward ----
