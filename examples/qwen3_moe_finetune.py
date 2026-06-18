@@ -109,6 +109,11 @@ class Qwen3MoEBlock(nn.Module):
 
         # MoEWatch auto-detects 'gate' by leaf name heuristic.
         self.gate = nn.Linear(hidden_dim, num_experts, bias=False)
+        # Expose top_k on the gate module so MoEWatch's RouterForwardHook
+        # can infer the correct number of experts per token via _infer_top_k().
+        # Without this, the hook falls back to top_k=1 (argmax), producing
+        # artificially extreme load imbalance ratios on every step.
+        self.gate.top_k = top_k
 
         # Expert feed-forwards — SwiGLU-style (simplified to two linears).
         self.experts = nn.ModuleList([
@@ -276,17 +281,18 @@ def make_finetune_config() -> WatchConfig:
         load_imbalance_error=6.0,
 
         # Expert health — thresholds calibrated for THIS toy model's actual
-        # gradient scale (HIDDEN_DIM=64, batch=2, seq=32), not real Qwen3-7B
-        # scale. Measured empirically: an expert actually receiving tokens
-        # has grad_norm roughly in [0.0006, 0.02] across warm-up/specialise/
-        # collapse/recovery; an expert receiving NO tokens has grad_norm
-        # exactly 0. dead_threshold sits below the smallest observed active
-        # value (so truly-unrouted experts are caught, not low-but-real
-        # ones); cold_threshold sits below the typical active median so
-        # healthy experts don't spend many consecutive steps under it.
-        dead_threshold=0.0004,
-        cold_threshold=0.0015,
-        cold_steps_limit=15,        # faster escalation in fine-tune
+        # gradient scale (HIDDEN_DIM=64, batch=2, seq=32).
+        #
+        # Measured expert first-param grad norms:
+        #   Routed expert     : norm ~ 2.0 – 15.0  (receives tokens each step)
+        #   Unrouted expert   : norm = 0.0          (synthetic zero written by hook)
+        #
+        # dead_threshold must sit between 0.0 (synthetic zero) and ~2.0 (min active).
+        # cold_threshold must sit below the typical active floor (~2.0) so that
+        # only persistently-underloaded experts accumulate cold_steps.
+        dead_threshold=0.5,     # < min active norm of ~2.0; catches truly unrouted
+        cold_threshold=1.0,     # below active floor; sporadically-routed experts
+        cold_steps_limit=15,    # faster escalation in fine-tune
 
         # Sampling — fine-tune runs are short, collect everything
         log_every=10,
@@ -346,32 +352,92 @@ def run_finetune_simulation() -> None:
     for step in range(1, total_steps + 1):
 
         # ---- Phase routing injection ----
-        if step <= 20:
+        # Routing weights are set ONCE at each phase boundary, not every step.
+        # Resetting every step would show a different distribution on each
+        # forward pass, causing false load-imbalance alerts during warm-up
+        # and preventing MoEWatch from accumulating consistent statistics.
+        if step == 1:
+            # Phase 1 boundary: healthy uniform routing
             model.set_healthy_routing()
-            phase_tag  = "warm-up (uniform)"
-            phase_key  = "warm_up"
 
-        elif step <= 60:
-            # Progressive specialisation: dominant pool shrinks 64 → 16 experts
-            n_dom = max(16, 64 - int((step - 20) / 40 * 48))
-            model.set_task_specialisation(n_dominant=n_dom, boost=1.5)
-            phase_tag = f"specialising ({n_dom} dominant)"
-            phase_key = "specialisation"
+        elif step == 21:
+            # Phase 2 boundary: mild specialisation begins
+            model.set_task_specialisation(n_dominant=52, boost=1.5)
 
-        elif step <= 90:
-            # Severe collapse: 4 experts monopolise all routing
+        elif step == 31:
+            model.set_task_specialisation(n_dominant=40, boost=1.5)
+
+        elif step == 41:
+            model.set_task_specialisation(n_dominant=28, boost=1.5)
+
+        elif step == 51:
+            model.set_task_specialisation(n_dominant=16, boost=1.5)
+
+        elif step == 61:
+            # Phase 3 boundary: severe collapse
             model.set_collapse_pressure(n_dominant=4, boost=4.0)
-            phase_tag = "collapsing (4-expert monopoly)"
-            phase_key = "collapse"
 
-        else:
-            # Partial recovery: noise injected, experts gradually diversify
-            noise_recovery = (step - 90) / 30
+        elif step == 91:
+            # Phase 4 boundary: reset to healthy then add mild perturbation.
+            # Do this ONCE — never accumulate noise across steps, which would
+            # create increasingly extreme weights that look like collapse.
+            model.set_healthy_routing()
             with torch.no_grad():
                 for layer in model.layers:
-                    gate = layer.mlp.gate
-                    gate.weight.data += torch.randn_like(gate.weight) * noise_recovery * 0.3
-            phase_tag = f"recovering ({noise_recovery:.0%})"
+                    layer.mlp.gate.weight.data.add_(
+                        torch.randn_like(layer.mlp.gate.weight) * 0.15
+                    )
+            # Flush stale collapse-era routing events from the stat_collector
+            # ring buffers. Without this, the window=100 buffer still holds
+            # 30 steps of collapse-era data, dragging risk up during recovery.
+            for buf in watcher.hook_manager.stat_collector._routing_buffers.values():
+                buf.clear()
+
+        elif step == 101:
+            # Second recovery checkpoint: reduce residual noise
+            model.set_healthy_routing()
+            with torch.no_grad():
+                for layer in model.layers:
+                    layer.mlp.gate.weight.data.add_(
+                        torch.randn_like(layer.mlp.gate.weight) * 0.08
+                    )
+
+        elif step == 111:
+            # Final recovery checkpoint: near-healthy routing
+            model.set_healthy_routing()
+            with torch.no_grad():
+                for layer in model.layers:
+                    layer.mlp.gate.weight.data.add_(
+                        torch.randn_like(layer.mlp.gate.weight) * 0.03
+                    )
+
+        # Derive phase label from current step (no routing change needed)
+        if step <= 20:
+            phase_tag = "warm-up (uniform)"
+            phase_key = "warm_up"
+        elif step <= 30:
+            phase_tag = "specialising (52 dominant)"
+            phase_key = "specialisation"
+        elif step <= 40:
+            phase_tag = "specialising (40 dominant)"
+            phase_key = "specialisation"
+        elif step <= 50:
+            phase_tag = "specialising (28 dominant)"
+            phase_key = "specialisation"
+        elif step <= 60:
+            phase_tag = "specialising (16 dominant)"
+            phase_key = "specialisation"
+        elif step <= 90:
+            phase_tag = "collapsing (4-expert monopoly)"
+            phase_key = "collapse"
+        elif step <= 100:
+            phase_tag = "recovering (33%)"
+            phase_key = "recovery"
+        elif step <= 110:
+            phase_tag = "recovering (67%)"
+            phase_key = "recovery"
+        else:
+            phase_tag = "recovering (100%)"
             phase_key = "recovery"
 
         # ---- Forward + backward ----
