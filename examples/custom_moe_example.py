@@ -574,11 +574,12 @@ def demo4_low_level_api() -> None:
     # --- Show what intervention would fire at this risk score ---
     print()
     policy = RulePolicy(config)
-    from moewatch.policy.base import InterventionState
-    state  = InterventionState(
+    from moewatch.policy.base import PolicyState
+    state  = PolicyState(
         layer_name=layer,
         risk_score=rr.risk_score,
-        step=99,
+        layer_id=3,
+        training_step=99,
         intervention_history=[],
     )
     action = policy.select_action(state)
@@ -594,9 +595,9 @@ def demo4_low_level_api() -> None:
 def main() -> None:
     print()
     print("╔══════════════════════════════════════════════════════════════════╗")
-    print("║  MoEWatch v0.2.0 — Custom MoE Architecture Example              ║")
-    print("║  Non-standard router names, variable expert counts,             ║")
-    print("║  manual override, all action types, low-level API               ║")
+    print("║  MoEWatch v0.2.0 — Custom MoE Architecture Example               ║")
+    print("║  Non-standard router names, variable expert counts,              ║")
+    print("║  manual override, all action types, low-level API                ║")
     print("╚══════════════════════════════════════════════════════════════════╝")
     print()
 

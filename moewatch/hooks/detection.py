@@ -157,35 +157,70 @@ def _resolve_manual_override(
 ) -> Dict[str, nn.Module]:
     """Resolve a user-provided list of router module names.
 
+    Each entry in ``router_module_names`` is resolved in one of two ways:
+
+    1. **Fully-qualified path** — if the name resolves directly via
+       ``model.get_submodule()`` it is used as-is.  Example:
+       ``"layers.0.moe.dispatch_router"``.
+
+    2. **Bare name / suffix** — if the name cannot be resolved directly,
+       ``model.named_modules()`` is scanned and every module whose dotted
+       path ends with that name is collected.  Example:
+       ``"dispatch_router"`` matches ``layers.0.moe.dispatch_router``,
+       ``layers.1.moe.dispatch_router``, etc.
+
     Parameters
     ----------
     model : torch.nn.Module
         Model to resolve submodules from.
     router_module_names : list[str]
-        Fully-qualified dotted module names, as they would appear as keys
-        in ``model.named_modules()``.
+        Fully-qualified dotted paths **or** bare module names/suffixes.
 
     Returns
     -------
     dict[str, torch.nn.Module]
-        Mapping of name to resolved module, in the order provided.
+        Mapping of fully-qualified name → module for every matched module,
+        in traversal order.
 
     Raises
     ------
     ValueError
-        If any name cannot be resolved via ``model.get_submodule()``. The
-        error message lists *all* unresolved names at once, so the user
-        can fix every typo in a single iteration rather than one at a
-        time.
+        If any entry cannot be resolved either as a direct path or as a
+        suffix match against ``model.named_modules()``.
     """
     resolved: Dict[str, nn.Module] = {}
     unresolved: List[str] = []
 
+    # Build full named_modules map once for suffix scanning.
+    all_named: Dict[str, nn.Module] = dict(model.named_modules())
+
     for name in router_module_names:
+        # 1. Try direct fully-qualified lookup first.
         try:
             module = model.get_submodule(name)
             resolved[name] = module
+            continue
         except AttributeError:
+            pass
+
+        # 2. Fall back: collect all modules whose path ends with this name.
+        suffix = f".{name}"
+        matches = {
+            full_name: mod
+            for full_name, mod in all_named.items()
+            if full_name == name or full_name.endswith(suffix)
+        }
+
+        if matches:
+            resolved.update(matches)
+            logger.debug(
+                "[MoEWatch] detect_router_modules(): bare name %r matched "
+                "%d module(s) by suffix scan: %s",
+                name,
+                len(matches),
+                list(matches.keys()),
+            )
+        else:
             unresolved.append(name)
 
     if unresolved:
