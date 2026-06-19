@@ -58,7 +58,11 @@ import torch.nn as nn
 
 from moewatch.config import WatchConfig
 from moewatch.hooks.detection import detect_router_modules
-from moewatch.hooks.gradient_hook import GradientStarvationHook
+from moewatch.hooks.gradient_hook import (
+    GradientEvent,
+    GradientStarvationHook,
+    MoEBlockGradientHook,
+)
 from moewatch.hooks.router_hook import RouterForwardHook
 
 if TYPE_CHECKING:
@@ -133,7 +137,9 @@ class HookManager:
         # Active hook callables, kept so set_global_step() can fan out the
         # current training step to every hook without re-walking the model.
         self._router_hooks: List[RouterForwardHook] = []
-        self._gradient_hooks: List[GradientStarvationHook] = []
+        self._gradient_hooks: List[
+            "GradientStarvationHook | MoEBlockGradientHook"
+        ] = []
 
         self._attached: bool = False
 
@@ -260,23 +266,9 @@ class HookManager:
 
         Should be called once per training step (typically at the start
         of ``MoEWatch.step()``) before the next forward/backward pass, so
-        that:
-
-        - :class:`RouterForwardHook` instances tag emitted
-          :class:`RoutingEvent` objects with the correct step.
-        - :class:`GradientStarvationHook` instances both tag
-          :class:`GradientEvent` objects correctly *and* compute the
-          sampling decision (``global_step % config.sample_every == 0``)
-          against the correct step.
-
-        Before advancing the step counter, this method calls
-        :meth:`flush_missing_gradient_events` for the *previous* step so
-        that any expert whose backward hook did not fire (because it
-        received zero tokens and therefore had no gradient path) gets an
-        explicit zero-norm :class:`GradientEvent` written into its buffer.
-        Without this, a dead expert's buffer goes stale — it retains old
-        healthy-looking norms from before collapse — and the
-        gradient-starvation analyzer never detects the silence.
+        that all hooks tag emitted events with the correct step and
+        compute the sampling decision (``global_step % config.sample_every``)
+        correctly.
 
         Parameters
         ----------
@@ -287,93 +279,33 @@ class HookManager:
         -------
         None
         """
-        # Flush zero-norm events for experts that were silent during the
-        # step we are leaving. Must happen BEFORE we advance _global_step
-        # on each hook, so flush logic can compare against the old step.
-        if self._gradient_hooks:
-            prev_step = self._gradient_hooks[0]._global_step
-            if prev_step > 0:  # skip the initial dummy step-0 flush
-                self.flush_missing_gradient_events(prev_step)
-
         for hook in self._router_hooks:
             hook.set_global_step(global_step)
         for hook in self._gradient_hooks:
             hook.set_global_step(global_step)
 
-    def flush_missing_gradient_events(self, step: int) -> None:
-        """Write zero-norm gradient events for experts silent this step.
+    def flush_missing_gradient_events(self, step: int = 0) -> None:
+        """No-op retained for API compatibility.
 
-        PyTorch only invokes a ``register_hook`` callback when a gradient
-        actually flows through the tensor. If an expert received zero
-        tokens in this step its weight has no backward edge and the hook
-        is simply never called — not called with a zero gradient, just
-        never called. Without intervention the expert's gradient buffer
-        goes stale, retaining the last real norms from before it stopped
-        being used, so ``norm_mean`` stays high and starvation is never
-        detected.
-
-        This method closes that gap: for every registered
-        :class:`GradientStarvationHook` whose ``last_fired_step`` is not
-        equal to ``step``, we synthesize a
-        :class:`~moewatch.hooks.gradient_hook.GradientEvent` with
-        ``gradient_norm = 0.0`` and write it to the stat collector. This
-        keeps the rolling window current and lets the analyzer see the
-        silence immediately.
-
-        Sampling awareness
-        ------------------
-        Zero-stamping only happens on steps that would have been sampled
-        (``step % config.sample_every == 0``). On non-sampled steps the
-        hook is intentionally silent for ALL experts — healthy or dead —
-        so no zero-stamp should be written (it would incorrectly penalize
-        healthy experts that weren't sampled this step).
+        Previously synthesised zero-norm events for per-param
+        ``GradientStarvationHook`` instances that did not fire (because
+        their expert received no tokens and therefore had no backward
+        edge). This complement step is no longer necessary:
+        :class:`MoEBlockGradientHook` fires once per MoE block rather
+        than once per parameter, reads all expert ``.grad`` attributes
+        inline, and explicitly records ``gradient_norm=0.0`` for any
+        expert whose ``grad is None`` — covering the dead-expert case
+        in the same pass that records live experts.
 
         Parameters
         ----------
-        step : int
-            The training step number just completed (i.e. the step whose
-            backward pass has finished).
+        step : int, optional
+            Ignored. Retained so existing call sites do not need changes.
 
         Returns
         -------
         None
         """
-        sample_every = max(1, self.config.sample_every)
-        if step % sample_every != 0:
-            # Non-sampled step — hooks are intentionally silent for everyone.
-            return
-
-        import time as _time
-        from moewatch.hooks.gradient_hook import GradientEvent
-
-        for hook in self._gradient_hooks:
-            if hook.last_fired_step == step:
-                # This expert fired normally this step — nothing to do.
-                continue
-
-            # Expert was silent this step on a sampled step → dead/starved.
-            # Write an explicit zero-norm event so the rolling window stays
-            # current and the starvation analyzer sees the silence.
-            try:
-                event = GradientEvent(
-                    timestamp=_time.time(),
-                    global_step=step,
-                    layer_name=hook.layer_name,
-                    expert_id=hook.expert_id,
-                    gradient_norm=0.0,
-                    gradient_magnitude=0.0,
-                )
-                self.stat_collector.write_gradient_event(event)
-            except Exception as exc:  # pylint: disable=broad-except
-                logger.debug(
-                    "[MoEWatch] flush_missing_gradient_events: failed to "
-                    "write zero-norm event for ('%s', expert=%d) at "
-                    "step=%d: %s",
-                    hook.layer_name,
-                    hook.expert_id,
-                    step,
-                    exc,
-                )
 
     # ------------------------------------------------------------------
     # Query interface
@@ -441,23 +373,33 @@ class HookManager:
     def _attach_gradient_hooks(
         self, layer_name: str, router_module: nn.Module
     ) -> None:
-        """Register :class:`GradientStarvationHook` instances for experts.
+        """Register one :class:`MoEBlockGradientHook` for the parent MoE block.
 
         Locates the expert weight parameters associated with
-        ``router_module``'s parent MoE block and registers one
-        :class:`GradientStarvationHook` per expert via
-        ``Tensor.register_hook`` on the expert's primary weight
-        parameter.
+        ``router_module``'s parent MoE block and registers a **single**
+        :class:`MoEBlockGradientHook` on that parent module via
+        ``register_full_backward_hook``.  This fires once per backward
+        pass per block rather than once per expert parameter, reducing the
+        number of Python→C++ hook invocations from
+        ``N_layers × N_experts`` (e.g. 28 × 64 = 1 792) to ``N_layers``
+        (28) — roughly a **64× reduction** in per-backward Python overhead.
+
+        The block-level hook reads each expert's ``.grad`` attribute
+        inline and records ``gradient_norm=0.0`` for experts whose
+        ``grad is None`` (i.e. experts that received no tokens and had no
+        backward edge), making the separate
+        :meth:`flush_missing_gradient_events` complement step redundant.
 
         Parameters
         ----------
         layer_name : str
-            Fully-qualified name of the router module. Used to derive
-            the sibling "experts" container's name within the same
-            parent module.
+            Fully-qualified name of the router module (e.g.
+            ``"layers.5.mlp.gate"``). Used as the outer key in
+            :class:`~moewatch.collector.stat_collector.StatCollector`'s
+            gradient buffers (unchanged from the per-param convention).
         router_module : torch.nn.Module
-            The router module instance; used to locate its parent module
-            (the MoE block containing the experts container).
+            The router module instance; used to locate the parent MoE
+            block on which the hook is registered.
 
         Returns
         -------
@@ -483,30 +425,37 @@ class HookManager:
             )
             return
 
-        for expert_id, param in enumerate(expert_params):
-            if param is None or not param.requires_grad:
-                continue
-
-            hook = GradientStarvationHook(
-                layer_name=layer_name,
-                expert_id=expert_id,
-                stat_collector=self.stat_collector,
-                config=self.config,
+        # Resolve the parent MoE block to attach the module-level hook.
+        parent_name = self._parent_module_name(layer_name)
+        try:
+            parent_module = (
+                self.model.get_submodule(parent_name) if parent_name else self.model
             )
-            handle = param.register_hook(hook)
+        except AttributeError:
+            logger.debug(
+                "[MoEWatch] HookManager: could not resolve parent module "
+                "'%s' for layer '%s'; gradient-starvation signal unavailable.",
+                parent_name,
+                layer_name,
+            )
+            return
 
-            self._handles.append(handle)
-            self._gradient_hooks.append(hook)
+        hook = MoEBlockGradientHook(
+            layer_name=layer_name,
+            expert_params=expert_params,
+            stat_collector=self.stat_collector,
+            config=self.config,
+        )
+        handle = parent_module.register_full_backward_hook(hook)
+
+        self._handles.append(handle)
+        self._gradient_hooks.append(hook)
 
         logger.debug(
-            "[MoEWatch] HookManager: registered %d gradient hook(s) for "
-            "layer '%s'.",
-            sum(
-                1
-                for p in expert_params
-                if p is not None and p.requires_grad
-            ),
+            "[MoEWatch] HookManager: registered 1 block-level gradient "
+            "hook for '%s' covering %d expert parameter(s).",
             layer_name,
+            sum(1 for p in expert_params if p is not None and p.requires_grad),
         )
 
     # ------------------------------------------------------------------
