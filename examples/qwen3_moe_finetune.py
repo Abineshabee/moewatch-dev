@@ -284,8 +284,8 @@ def make_finetune_config() -> WatchConfig:
         # unrouted) and 2.0 (minimum active), catching only true dead experts;
         # cold_threshold=1.0 sits below the healthy median so only genuinely
         # struggling experts are flagged as cold without noise.
-        dead_threshold=0.5,
-        cold_threshold=1.0,
+        dead_threshold=0.0005,
+        cold_threshold=0.002,
         cold_steps_limit=15,        # faster escalation in fine-tune
 
         # Sampling — fine-tune runs are short, collect everything
@@ -370,46 +370,73 @@ def run_finetune_simulation() -> None:
         else:
             # ---- Recovery phase: controlled weight blending toward uniform ----
             if step == 91:
-                # STEP 1: Clear stale collapse-era routing/gradient events
-                # This prevents collapse-phase data from contaminating recovery
-                # risk calculations. With a 100-step ring buffer, 30 steps of
-                # collapse data were still averaging with new recovery data.
+                # STEP 1: Clear stale collapse-era routing and gradient events.
+                # Routing buffers: prevents collapse-phase routing data polluting
+                # T2 entropy calculations in recovery.
+                # Gradient buffers: prevents 90+ steps of near-zero collapse-era
+                # gradient norms from averaging with healthy recovery norms. With
+                # recalibrated thresholds (dead=0.0005, cold=0.002), empty buffers
+                # return n_samples=0 -> starvation_score=0.0 (healthy default),
+                # so clearing is now safe and necessary.
                 for buf in watcher.stat_collector._routing_buffers.values():
                     buf.clear()
                 for expert_buffers in watcher.stat_collector._gradient_buffers.values():
                     for buf in expert_buffers.values():
                         buf.clear()
 
-                # STEP 2: Save current (collapsed) gate weights as baseline.
-                # We will blend FROM these weights TOWARD uniform initialization.
-                for i, layer in enumerate(model.layers):
-                    layer_name = f"layers.{i}.mlp.gate"
-                    healthy_gate_weights[layer_name] = layer.mlp.gate.weight.data.clone()
+                # STEP 1b: Reset T1 starvation state machine.
+                # GradientStarvationAnalyzer keeps persistent _starvation_counters
+                # tracking consecutive cold steps per expert. During collapse ~60/64
+                # experts accumulate large counts (never routed → zero gradient).
+                # These counters are not touched by ring buffer clears, so without
+                # this reset T1 stays pinned near 1.0 throughout recovery.
+                # _onset_steps is also cleared so onset timestamps reflect recovery.
+                watcher.gradient_analyzer._starvation_counters.clear()
+                watcher.gradient_analyzer._onset_steps.clear()
 
-                # STEP 3: Reinitialize all gate weights to uniform (healthy state)
-                # This provides the target state for blending back.
+                # STEP 1c: Reset T2 entropy history and CUSUM detectors.
+                # EntropyAnalyzer retains _entropy_history (used by _classify_trend)
+                # and _cusum_detectors (stateful change-point detectors). The CUSUM
+                # state accumulated during collapse keeps drift_detected=True into
+                # recovery, boosting T2 by 1.2× even after routing normalises.
+                # Clearing both lets T2 reflect only fresh recovery-phase entropy.
+                watcher.entropy_analyzer._entropy_history.clear()
+                watcher.entropy_analyzer._cusum_detectors.clear()
+
+                # STEP 2: Reinitialize gate weights to uniform (healthy state).
+                # This is the safe starting point: small random weights produce
+                # near-uniform softmax routing so all experts receive tokens and
+                # gradients. We save these uniform weights as the recovery baseline.
                 with torch.no_grad():
-                    for layer in model.layers:
+                    for i, layer in enumerate(model.layers):
+                        layer_name = f"layers.{i}.mlp.gate"
                         layer.mlp.gate.weight.data.normal_(0, 0.02)
+                        healthy_gate_weights[layer_name] = layer.mlp.gate.weight.data.clone()
 
-            # RECOVERY: Blend from uniform initialization back toward learned state.
-            # As α increases (0 → 1), we move from uniform → learned weights.
-            # The interventions (aux_loss_coef changes) drive the learned state
-            # to be non-collapsing, so this blending supports recovery.
-            blend_factor = (step - 91) / 29  # 0 at step 91, ~1 at step 120
-            blend_factor = min(blend_factor, 1.0)  # Clamp to [0, 1]
+            # RECOVERY: Blend from uniform initialization toward optimizer-learned weights.
+            # α=0 (step 91): pure uniform init (all experts receive tokens, healthy).
+            # α=1 (step 120): fully optimizer-learned weights (should be non-collapsing
+            #                 because aux_loss interventions drove them away from collapse).
+            blend_factor = (step - 91) / 29  # 0.0 at step 91, ~1.0 at step 120
+            blend_factor = min(blend_factor, 1.0)
 
             with torch.no_grad():
                 for i, layer in enumerate(model.layers):
                     layer_name = f"layers.{i}.mlp.gate"
-                    # Blend: w_t = (1 - α) * healthy + α * learned
-                    # α=0: pure uniform (safe)
-                    # α=1: back to learned (converged)
-                    healthy = healthy_gate_weights.get(layer_name)
-                    if healthy is not None:
+                    uniform_baseline = healthy_gate_weights.get(layer_name)
+                    if uniform_baseline is not None:
+                        # current = weights as updated by the optimizer this step
                         current = layer.mlp.gate.weight.data
-                        blended = (1 - blend_factor) * healthy + blend_factor * current
-                        layer.mlp.gate.weight.data.copy_(blended)
+                        # Blend: w_t = (1 - α) * uniform + α * learned
+                        blended = (1 - blend_factor) * uniform_baseline + blend_factor * current
+                        # Add a small fixed-scale noise so that near-uniform logits
+                        # still produce diverse top-k selections each step. Without
+                        # this, normal_(0, 0.02) weights produce nearly identical
+                        # softmax values and the same 8 experts win every step,
+                        # leaving 56/64 experts with zero gradient (flush_missing
+                        # zero-stamps them) and starvation_score stays at 1.0.
+                        noise = torch.randn_like(blended) * 0.1 * (1 - blend_factor)
+                        layer.mlp.gate.weight.data.copy_(blended + noise)
 
             blend_pct = int(blend_factor * 100)
             phase_tag = f"recovering ({blend_pct}% learned)"
@@ -449,6 +476,29 @@ def run_finetune_simulation() -> None:
                 f"alerts={n_alerts:>4} | interventions={n_actions} | "
                 f"aux_coef={aux_coef:.5f}"
             )
+
+            # Debug: T1/T2/T3 breakdown for recovery phase
+            if step >= 100 and report.risk_scores:
+                worst_layer = max(report.risk_scores, key=report.risk_scores.get)
+                dominant = report.dominant_signals.get(worst_layer, "?")
+
+                ent_reports_dbg = watcher.entropy_analyzer.analyze(watcher.stat_collector)
+                grad_reports_dbg = watcher.gradient_analyzer.analyze(watcher.stat_collector)
+
+                ent_r = ent_reports_dbg.get(worst_layer)
+                grad_layer = grad_reports_dbg.get(worst_layer, [])
+                worst_grad = max(grad_layer, key=lambda r: r.starvation_score) if grad_layer else None
+
+                ent_info = (f"norm_ent={ent_r.normalized_entropy:.3f} drift={ent_r.drift_detected}"
+                            if ent_r else "no ent")
+                grad_info = (f"grad_mean={worst_grad.gradient_norm_mean:.5f} starv={worst_grad.starvation_score:.3f} n_samples={worst_grad.n_samples}"
+                             if worst_grad else "no grad")
+
+                print(
+                    f"    [DEBUG] worst={worst_layer} dominant={dominant}\n"
+                    f"    [DEBUG] {ent_info}\n"
+                    f"    [DEBUG] {grad_info}"
+                )
 
     # ------------------------------------------------------------------
     # 3. Post-fine-tuning summary
