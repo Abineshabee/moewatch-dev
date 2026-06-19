@@ -177,12 +177,12 @@ class TestGradientStarvationInsufficientSamples:
 
 class TestGradientStarvationHealthy:
     def test_healthy_norms_zero_starvation_score(
-        self, default_config: WatchConfig
+        self, strict_config: WatchConfig
     ) -> None:
-        """Gradient norms well above cold_threshold (0.05 default) produce
+        """Gradient norms well above cold_threshold (strict_config: 0.02) produce
         starvation_score == 0.0 and starvation_detected == False."""
-        analyzer = GradientStarvationAnalyzer(default_config)
-        collector = StatCollector(default_config)
+        analyzer = GradientStarvationAnalyzer(strict_config)
+        collector = StatCollector(strict_config)
 
         norms = [0.5] * 10
         _feed_gradients(collector, "layers.0.experts", 0, norms)
@@ -464,10 +464,10 @@ class TestGradientStarvationNonFinite:
 
 class TestGradientStarvationMultiExpertMultiLayer:
     def test_multiple_experts_tracked_independently_ordered(
-        self, default_config: WatchConfig
+        self, strict_config: WatchConfig
     ) -> None:
-        analyzer = GradientStarvationAnalyzer(default_config)
-        collector = StatCollector(default_config)
+        analyzer = GradientStarvationAnalyzer(strict_config)
+        collector = StatCollector(strict_config)
 
         _feed_gradients(collector, "layers.0.experts", 0, [0.5] * 5)
         _feed_gradients(collector, "layers.0.experts", 1, [0.001] * 5)
@@ -485,9 +485,9 @@ class TestGradientStarvationMultiExpertMultiLayer:
         assert by_id[1].starvation_score > 0.0
         assert by_id[2].starvation_score == 0.0
 
-    def test_multiple_layers_independent(self, default_config: WatchConfig) -> None:
-        analyzer = GradientStarvationAnalyzer(default_config)
-        collector = StatCollector(default_config)
+    def test_multiple_layers_independent(self, strict_config: WatchConfig) -> None:
+        analyzer = GradientStarvationAnalyzer(strict_config)
+        collector = StatCollector(strict_config)
 
         _feed_gradients(collector, "layers.0.experts", 0, [0.5] * 5)
         _feed_gradients(collector, "layers.1.experts", 0, [0.001] * 5)
