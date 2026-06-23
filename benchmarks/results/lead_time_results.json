@@ -1,0 +1,211 @@
+{
+  "config": {
+    "n_seeds": 20,
+    "n_steps": 200,
+    "collapse_step": 80,
+    "collapse_layer": 0,
+    "collapse_strength": 12.0,
+    "batch_size": 2,
+    "seq_len": 32,
+    "num_layers": 28,
+    "num_experts": 64,
+    "hidden_dim": 64,
+    "top_k": 8,
+    "device": "cuda",
+    "optimisations": [
+      "batched_bmm_dispatch",
+      "routing_prob_cache",
+      "sgd_optimizer",
+      "early_exit_per_seed",
+      "parallel_seeds_on_cpu"
+    ],
+    "baselines": {
+      "utilization_threshold": 0.7,
+      "entropy_threshold": 0.35,
+      "aux_loss_threshold": 0.3
+    },
+    "environment": {
+      "os": "Windows 10.0.26200",
+      "cpu": "AMD64 Family 26 Model 36 Stepping 0, AuthenticAMD",
+      "cores": "10 physical / 20 logical",
+      "ram_gb": 24.8,
+      "gpu": "NVIDIA GeForce RTX 4050 Laptop GPU",
+      "vram_gb": 6.4,
+      "cuda": "12.6",
+      "pytorch": "2.11.0+cu126",
+      "python": "3.13.7"
+    }
+  },
+  "wall_time_seconds": 559.56,
+  "per_seed": [
+    {
+      "seed": 0,
+      "t_moewatch": null,
+      "t_utilization": 80,
+      "t_entropy": 80,
+      "t_aux_loss": 1
+    },
+    {
+      "seed": 1,
+      "t_moewatch": null,
+      "t_utilization": 80,
+      "t_entropy": 80,
+      "t_aux_loss": 1
+    },
+    {
+      "seed": 2,
+      "t_moewatch": null,
+      "t_utilization": 80,
+      "t_entropy": 80,
+      "t_aux_loss": 1
+    },
+    {
+      "seed": 3,
+      "t_moewatch": null,
+      "t_utilization": 80,
+      "t_entropy": 80,
+      "t_aux_loss": 1
+    },
+    {
+      "seed": 4,
+      "t_moewatch": null,
+      "t_utilization": 80,
+      "t_entropy": 80,
+      "t_aux_loss": 1
+    },
+    {
+      "seed": 5,
+      "t_moewatch": null,
+      "t_utilization": 80,
+      "t_entropy": 80,
+      "t_aux_loss": 1
+    },
+    {
+      "seed": 6,
+      "t_moewatch": null,
+      "t_utilization": 80,
+      "t_entropy": 80,
+      "t_aux_loss": 1
+    },
+    {
+      "seed": 7,
+      "t_moewatch": null,
+      "t_utilization": 80,
+      "t_entropy": 80,
+      "t_aux_loss": 1
+    },
+    {
+      "seed": 8,
+      "t_moewatch": null,
+      "t_utilization": 80,
+      "t_entropy": 80,
+      "t_aux_loss": 1
+    },
+    {
+      "seed": 9,
+      "t_moewatch": null,
+      "t_utilization": 80,
+      "t_entropy": 80,
+      "t_aux_loss": 1
+    },
+    {
+      "seed": 10,
+      "t_moewatch": null,
+      "t_utilization": 80,
+      "t_entropy": 80,
+      "t_aux_loss": 1
+    },
+    {
+      "seed": 11,
+      "t_moewatch": null,
+      "t_utilization": 80,
+      "t_entropy": 80,
+      "t_aux_loss": 1
+    },
+    {
+      "seed": 12,
+      "t_moewatch": null,
+      "t_utilization": 80,
+      "t_entropy": 80,
+      "t_aux_loss": 1
+    },
+    {
+      "seed": 13,
+      "t_moewatch": null,
+      "t_utilization": 80,
+      "t_entropy": 80,
+      "t_aux_loss": 1
+    },
+    {
+      "seed": 14,
+      "t_moewatch": null,
+      "t_utilization": 80,
+      "t_entropy": 80,
+      "t_aux_loss": 1
+    },
+    {
+      "seed": 15,
+      "t_moewatch": null,
+      "t_utilization": 80,
+      "t_entropy": 80,
+      "t_aux_loss": 1
+    },
+    {
+      "seed": 16,
+      "t_moewatch": null,
+      "t_utilization": 80,
+      "t_entropy": 80,
+      "t_aux_loss": 1
+    },
+    {
+      "seed": 17,
+      "t_moewatch": null,
+      "t_utilization": 80,
+      "t_entropy": 80,
+      "t_aux_loss": 1
+    },
+    {
+      "seed": 18,
+      "t_moewatch": null,
+      "t_utilization": 80,
+      "t_entropy": 80,
+      "t_aux_loss": 1
+    },
+    {
+      "seed": 19,
+      "t_moewatch": null,
+      "t_utilization": 80,
+      "t_entropy": 80,
+      "t_aux_loss": 1
+    }
+  ],
+  "fire_rates": {
+    "moewatch": 0.0,
+    "utilization": 1.0,
+    "entropy": 1.0,
+    "aux_loss": 1.0
+  },
+  "mean_detection_step": {
+    "moewatch": null,
+    "utilization": 80,
+    "entropy": 80,
+    "aux_loss": 1
+  },
+  "lead_time_advantage": {
+    "vs_utilization": {
+      "mean_steps": NaN,
+      "std_steps": NaN,
+      "n_pairs": 0
+    },
+    "vs_entropy": {
+      "mean_steps": NaN,
+      "std_steps": NaN,
+      "n_pairs": 0
+    },
+    "vs_aux_loss": {
+      "mean_steps": NaN,
+      "std_steps": NaN,
+      "n_pairs": 0
+    }
+  }
+}

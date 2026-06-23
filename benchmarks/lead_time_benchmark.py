@@ -24,19 +24,15 @@
   T_entropy     : per-layer routing-entropy threshold (no drift tracking)
   T_aux_loss    : auxiliary load-balancing loss spike threshold
 
-  Speed optimisations (v0.2.0)
-  ----------------------------
-  1. Batched expert dispatch  — replaces the 64-iteration Python loop with a
-     single stacked Linear + scatter_add over all experts at once.
-  2. Routing-prob cache       — hooks capture probs during the fwd pass so
-     get_routing_probs() never triggers a second forward pass.
-  3. SGD instead of AdamW     — 3-4× faster optimizer for a timing benchmark.
-  4. torch.compile            — optional graph-mode compilation (PyTorch ≥ 2.0).
-  5. Parallel seeds           — multiprocessing.Pool runs seeds concurrently
-     across CPU cores when CUDA is unavailable; serialised on GPU to avoid
-     context thrash.
-  6. Early-exit               — once all four detectors have fired, the run
-     stops immediately without completing remaining steps.
+  Speed optimisations
+  -------------------
+  1. Batched BMM expert dispatch  — gate weights are read from the ModuleList
+     experts but dispatched via a single stacked bmm, replacing the 64-iter
+     Python loop. ModuleList is kept so MoEWatch gradient hooks find experts.
+  2. Routing-prob cache  — probs captured in MoEBlock.forward() so baseline
+     detectors never need a second forward pass.
+  3. SGD instead of AdamW  — 3-4× cheaper per step.
+  4. Early-exit per seed  — stops as soon as all four detectors have fired.
 
   Setup
   -----
@@ -62,7 +58,6 @@ from __future__ import annotations
 import json
 import logging
 import math
-import multiprocessing as mp
 import random
 import statistics
 import sys
@@ -96,84 +91,86 @@ COLLAPSE_LAYER    = 0
 COLLAPSE_STRENGTH = 12.0
 
 # Baseline detection thresholds
-UTIL_IMBALANCE_THRESHOLD  = 0.70
-ENTROPY_THRESHOLD         = 0.35
-AUX_LOSS_SPIKE_THRESHOLD  = 0.30
-
-# Set True to try torch.compile (requires PyTorch >= 2.0, adds ~30s first-run cost)
-USE_COMPILE = False
+UTIL_IMBALANCE_THRESHOLD = 0.70   # max expert prob fraction → alert
+ENTROPY_THRESHOLD        = 0.35   # normalised entropy (0-1) → alert below
+# Correct aux-loss formula:
+#   L_aux = n_experts * mean_i(f_i * p_i)
+#   At uniform routing: f_i = p_i = 1/64, so L_aux = 64*(64*1/64^2) = 1.0
+#   Under collapse (one expert gets all): L_aux >> 1.0
+#   Threshold must be >> 1.0 so it only fires during actual collapse.
+AUX_LOSS_SPIKE_THRESHOLD = 3.0
 
 
 # ---------------------------------------------------------------------------
-# Optimised model
+# Fake model — MoEWatch-compatible
 # ---------------------------------------------------------------------------
 
 class _FakeQwen3Config:
     router_aux_loss_coef: float = 0.001
 
 
+class _ExpertMLP(nn.Module):
+    """Single expert. Kept as an nn.Module so MoEWatch's gradient hook can
+    find it inside the nn.ModuleList and attach a backward hook."""
+    def __init__(self) -> None:
+        super().__init__()
+        self.w1 = nn.Linear(HIDDEN_DIM, HIDDEN_DIM * 2, bias=False)
+        self.w2 = nn.Linear(HIDDEN_DIM * 2, HIDDEN_DIM, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.w2(F.silu(self.w1(x)))
+
+
 class _MoEBlock(nn.Module):
-    """
-    Batched expert dispatch — all 64 experts share weight tensors stacked into
-    (NUM_EXPERTS, in_features, out_features) so a single bmm replaces the
-    64-iteration Python loop. ~10-20× faster than the naïve loop.
+    """MoE block with:
+    - nn.ModuleList of experts  → MoEWatch gradient hooks find them correctly
+    - Batched BMM dispatch       → fast forward pass (no Python expert loop)
+    - Routing-prob cache         → baseline detectors skip the second fwd pass
     """
 
     def __init__(self) -> None:
         super().__init__()
-        self.gate = nn.Linear(HIDDEN_DIM, NUM_EXPERTS, bias=False)
-
-        # Stack expert weights: shape (E, D, 2D) and (E, 2D, D)
-        self.w1 = nn.Parameter(torch.empty(NUM_EXPERTS, HIDDEN_DIM, HIDDEN_DIM * 2))
-        self.w2 = nn.Parameter(torch.empty(NUM_EXPERTS, HIDDEN_DIM * 2, HIDDEN_DIM))
-        nn.init.kaiming_uniform_(self.w1, a=math.sqrt(5))
-        nn.init.kaiming_uniform_(self.w2, a=math.sqrt(5))
-
+        self.gate    = nn.Linear(HIDDEN_DIM, NUM_EXPERTS, bias=False)
+        self.experts = nn.ModuleList([_ExpertMLP() for _ in range(NUM_EXPERTS)])
         self.register_buffer("collapse_bias", torch.zeros(NUM_EXPERTS))
-
-        # Routing-prob cache written during forward; read by baseline detectors.
         self._cached_routing_probs: Optional[torch.Tensor] = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, S, D = x.shape
-        x_flat = x.reshape(-1, D)          # (T, D)
+        x_flat = x.reshape(-1, D)   # (T, D)
         T = x_flat.shape[0]
 
         logits = self.gate(x_flat) + self.collapse_bias   # (T, E)
         probs  = torch.softmax(logits, -1)                # (T, E)
 
-        # Cache mean probs so baseline detectors don't need a second fwd pass
+        # Cache for baseline detectors — no extra compute needed
         self._cached_routing_probs = probs.detach().mean(0)  # (E,)
 
         top_probs, top_idx = probs.topk(TOP_K, dim=-1)       # (T, K)
         top_probs = top_probs / top_probs.sum(-1, keepdim=True)
 
-        # ------------------------------------------------------------------
-        # Batched dispatch: for each top-k slot, look up the expert weight
-        # via indexing, run a single batched matmul across all (T*K) tokens.
-        # ------------------------------------------------------------------
-        # flat_idx : (T*K,)   which expert each (token, slot) pair uses
+        # ---- Batched BMM dispatch ----------------------------------------
+        # Stack w1/w2 weights from the ModuleList on-the-fly.
+        # (Stacking is O(E) Python but avoids 64 separate matmuls on GPU.)
+        w1 = torch.stack([e.w1.weight.T for e in self.experts])  # (E, D, 2D)
+        w2 = torch.stack([e.w2.weight.T for e in self.experts])  # (E, 2D, D)
+
         flat_idx    = top_idx.reshape(-1)                          # (T*K,)
         flat_weight = top_probs.reshape(-1, 1)                     # (T*K, 1)
-        flat_x      = x_flat[torch.arange(T, device=x.device)
-                              .unsqueeze(1).expand(T, TOP_K)
-                              .reshape(-1)]                        # (T*K, D)
+        tok_ids     = (torch.arange(T, device=x.device)
+                       .unsqueeze(1).expand(T, TOP_K).reshape(-1)) # (T*K,)
+        flat_x      = x_flat[tok_ids]                              # (T*K, D)
 
-        # Gather per-token expert weights: (T*K, D, 2D) and (T*K, 2D, D)
-        w1_sel = self.w1[flat_idx]     # (T*K, D, 2D)
-        w2_sel = self.w2[flat_idx]     # (T*K, 2D, D)
+        w1_sel = w1[flat_idx]   # (T*K, D, 2D)
+        w2_sel = w2[flat_idx]   # (T*K, 2D, D)
 
-        # bmm: (T*K, 1, D) @ (T*K, D, 2D) → (T*K, 1, 2D)
-        h = torch.bmm(flat_x.unsqueeze(1), w1_sel).squeeze(1)     # (T*K, 2D)
+        h = torch.bmm(flat_x.unsqueeze(1), w1_sel).squeeze(1)  # (T*K, 2D)
         h = F.silu(h)
-        h = torch.bmm(h.unsqueeze(1), w2_sel).squeeze(1)          # (T*K, D)
+        h = torch.bmm(h.unsqueeze(1), w2_sel).squeeze(1)       # (T*K, D)
 
-        # Weighted accumulation back into output
-        weighted = h * flat_weight                                 # (T*K, D)
-        token_ids = (torch.arange(T, device=x.device)
-                     .unsqueeze(1).expand(T, TOP_K).reshape(-1))  # (T*K,)
+        weighted = h * flat_weight                              # (T*K, D)
         out = torch.zeros_like(x_flat)
-        out.scatter_add_(0, token_ids.unsqueeze(1).expand_as(weighted), weighted)
+        out.scatter_add_(0, tok_ids.unsqueeze(1).expand_as(weighted), weighted)
 
         return out.reshape(B, S, D)
 
@@ -217,10 +214,10 @@ class _FakeQwen3MoEModel(nn.Module):
         self.layers[layer_idx].mlp._inject_collapse()
 
     def get_cached_routing_probs(self, layer_idx: int = COLLAPSE_LAYER) -> torch.Tensor:
-        """Return routing probs cached during the most recent forward pass — zero extra compute."""
+        """Return probs cached during the last forward pass — zero extra compute."""
         probs = self.layers[layer_idx].mlp._cached_routing_probs
         if probs is None:
-            raise RuntimeError("No cached routing probs yet; run a forward pass first.")
+            raise RuntimeError("No cached routing probs; run a forward pass first.")
         return probs
 
 
@@ -240,48 +237,44 @@ class _DummyTrainer:
 # ---------------------------------------------------------------------------
 
 def _detect_utilization(probs: torch.Tensor) -> bool:
+    """Fires when any expert captures > threshold fraction of tokens."""
     return bool(probs.max().item() > UTIL_IMBALANCE_THRESHOLD)
 
 
 def _routing_entropy_norm(probs: torch.Tensor) -> float:
-    n = probs.shape[0]
+    """Normalised routing entropy in [0, 1]. 1 = uniform, 0 = collapsed."""
     p = probs.clamp(min=1e-9)
-    return -(p * p.log()).sum().item() / math.log(n)
+    return -(p * p.log()).sum().item() / math.log(probs.shape[0])
 
 
 def _detect_entropy(probs: torch.Tensor) -> bool:
     return _routing_entropy_norm(probs) < ENTROPY_THRESHOLD
 
 
-def _detect_aux_loss(probs: torch.Tensor) -> bool:
+def _aux_loss(probs: torch.Tensor) -> float:
+    """
+    Standard load-balance aux loss:  n * mean_i(f_i * p_i)
+    where f_i ≈ p_i (mean gate prob used as token-fraction proxy).
+    At uniform routing ≈ 1.0. Rises sharply under collapse.
+    """
     n = probs.shape[0]
-    return float(n * (probs * probs).sum().item()) > AUX_LOSS_SPIKE_THRESHOLD
+    return float(n * (probs * probs).sum().item())
+
+
+def _detect_aux_loss(probs: torch.Tensor) -> bool:
+    return _aux_loss(probs) > AUX_LOSS_SPIKE_THRESHOLD
 
 
 # ---------------------------------------------------------------------------
 # Single-run experiment
 # ---------------------------------------------------------------------------
 
-def _run_one_seed(args: Tuple[int, str]) -> Dict:
-    """
-    Worker function — runs one seed. Accepts (seed, device_str) so it can
-    be called from a multiprocessing pool without pickling a device object.
-    """
-    seed, device_str = args
-    device = torch.device(device_str)
-
+def _run_one_seed(seed: int, device: torch.device) -> Dict:
     torch.manual_seed(seed)
     random.seed(seed)
 
     model     = _FakeQwen3MoEModel().to(device)
-    # SGD is 3-4× faster than AdamW for a timing benchmark
     optimizer = torch.optim.SGD(model.parameters(), lr=2e-5, momentum=0.9)
-
-    if USE_COMPILE:
-        try:
-            model = torch.compile(model)
-        except Exception:
-            pass
 
     from moewatch import MoEWatch
     from moewatch.config import WatchConfig, OutputMode
@@ -325,15 +318,13 @@ def _run_one_seed(args: Tuple[int, str]) -> Dict:
                     t_moewatch = step
                     break
 
-        # Use probs cached inside the MoEBlock during the forward pass above —
-        # no second forward pass needed.
+        # Probs cached inside MoEBlock.forward() — no second forward pass
         probs = model.get_cached_routing_probs(COLLAPSE_LAYER)
 
         if t_utilization  is None and _detect_utilization(probs): t_utilization  = step
-        if t_entropy       is None and _detect_entropy(probs):      t_entropy       = step
-        if t_aux_loss_det  is None and _detect_aux_loss(probs):     t_aux_loss_det  = step
+        if t_entropy       is None and _detect_entropy(probs):     t_entropy       = step
+        if t_aux_loss_det  is None and _detect_aux_loss(probs):    t_aux_loss_det  = step
 
-        # Early-exit once all four detectors have fired
         if all(v is not None for v in (t_moewatch, t_utilization, t_entropy, t_aux_loss_det)):
             break
 
@@ -359,7 +350,9 @@ def _lead_time_advantage(
     deltas = [tb - tm for tm, tb in zip(t_mw, t_bl) if tm is not None and tb is not None]
     if not deltas:
         return float("nan"), float("nan"), 0
-    return statistics.mean(deltas), (statistics.stdev(deltas) if len(deltas) > 1 else 0.0), len(deltas)
+    mean = statistics.mean(deltas)
+    std  = statistics.stdev(deltas) if len(deltas) > 1 else 0.0
+    return mean, std, len(deltas)
 
 
 def _fire_rate(lst: List[Optional[int]]) -> float:
@@ -376,8 +369,7 @@ def _mean_detect(lst: List[Optional[int]]) -> str:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    device     = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    device_str = str(device)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     print(f"\n{'='*72}")
     print(f"  MoEWatch v0.2.0 — Lead-Time Advantage Benchmark")
@@ -390,48 +382,26 @@ def main() -> None:
     print(f"  Steps/run     : {N_STEPS}")
     print(f"  Collapse at   : step {COLLAPSE_STEP}  "
           f"(layer {COLLAPSE_LAYER}, bias={COLLAPSE_STRENGTH})")
-    print(f"  Dispatch      : batched bmm  (no per-expert Python loop)")
+    print(f"  Dispatch      : batched bmm  (ModuleList kept for gradient hooks)")
     print(f"  Optimizer     : SGD+momentum  (no AdamW state overhead)")
     print(f"  Routing probs : forward-pass cache  (no second fwd pass)")
-
-    # On GPU: run seeds serially (CUDA context is not fork-safe).
-    # On CPU: use a multiprocessing pool to parallelise across cores.
-    use_parallel = (device.type == "cpu")
-    n_workers    = min(N_SEEDS, max(1, mp.cpu_count() - 1)) if use_parallel else 1
-    print(f"  Parallelism   : {'pool ×' + str(n_workers) if use_parallel else 'serial (GPU)'}")
+    print(f"  Parallelism   : serial (GPU)")
     print(f"{'='*72}\n")
 
-    seed_args = [(s, device_str) for s in range(N_SEEDS)]
     t0 = time.perf_counter()
 
-    if use_parallel and n_workers > 1:
-        with mp.Pool(processes=n_workers) as pool:
-            results_list = []
-            for res in pool.imap(_run_one_seed, seed_args):
-                results_list.append(res)
-                s = res["seed"]
-                print(
-                    f"  Seed {s:02d}/{N_SEEDS-1}  "
-                    f"T_moewatch={res['t_moewatch'] or 'N/A':>5}  "
-                    f"T_util={res['t_utilization'] or 'N/A':>5}  "
-                    f"T_ent={res['t_entropy'] or 'N/A':>5}  "
-                    f"T_aux={res['t_aux_loss'] or 'N/A':>5}"
-                )
-            results_list.sort(key=lambda r: r["seed"])
-    else:
-        results_list = []
-        for args in seed_args:
-            res = _run_one_seed(args)
-            results_list.append(res)
-            s = res["seed"]
-            sys.stdout.write(
-                f"  Seed {s:02d}/{N_SEEDS-1}  "
-                f"T_moewatch={str(res['t_moewatch'] or 'N/A'):>5}  "
-                f"T_util={str(res['t_utilization'] or 'N/A'):>5}  "
-                f"T_ent={str(res['t_entropy'] or 'N/A'):>5}  "
-                f"T_aux={str(res['t_aux_loss'] or 'N/A'):>5}\n"
-            )
-            sys.stdout.flush()
+    results_list: List[Dict] = []
+    for seed in range(N_SEEDS):
+        res = _run_one_seed(seed, device)
+        results_list.append(res)
+        sys.stdout.write(
+            f"  Seed {seed:02d}/{N_SEEDS-1}  "
+            f"T_moewatch={str(res['t_moewatch'] or 'N/A'):>5}  "
+            f"T_util={str(res['t_utilization'] or 'N/A'):>5}  "
+            f"T_ent={str(res['t_entropy'] or 'N/A'):>5}  "
+            f"T_aux={str(res['t_aux_loss'] or 'N/A'):>5}\n"
+        )
+        sys.stdout.flush()
 
     elapsed = time.perf_counter() - t0
 
@@ -491,13 +461,13 @@ def main() -> None:
             "num_experts":       NUM_EXPERTS,
             "hidden_dim":        HIDDEN_DIM,
             "top_k":             TOP_K,
-            "device":            device_str,
+            "device":            str(device),
             "optimisations": [
                 "batched_bmm_dispatch",
+                "modulelist_kept_for_gradient_hooks",
                 "routing_prob_cache",
                 "sgd_optimizer",
                 "early_exit_per_seed",
-                "parallel_seeds_on_cpu",
             ],
             "baselines": {
                 "utilization_threshold": UTIL_IMBALANCE_THRESHOLD,
