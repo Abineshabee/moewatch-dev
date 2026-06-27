@@ -279,13 +279,23 @@ def _run_one_seed(seed: int, device: torch.device) -> Dict:
     from moewatch import MoEWatch
     from moewatch.config import WatchConfig, OutputMode
 
+    collapse_layer_name = f"layers.{COLLAPSE_LAYER}.mlp.gate"
+
     config = WatchConfig(
         output=OutputMode.SILENT,
         sample_every=1,
         log_every=1,
         intervention_enabled=False,
-        dead_threshold=0.0005,
-        cold_threshold=0.002,
+        # --- gradient health (calibrated for hidden_dim=64, top-8/64) ---
+        dead_threshold=0.002,
+        cold_threshold=0.008,
+        # --- imbalance thresholds ---
+        load_imbalance_warn=2.5,
+        load_imbalance_error=4.0,
+        # --- fast-response rolling window (20 steps vs default 100) ---
+        stats_window=20,
+        # --- suppress CUSUM false-positives before collapse window ---
+        cusum_warmup=COLLAPSE_STEP - 5,
     )
     watcher = MoEWatch(model=model, config=config)
     trainer = _DummyTrainer(model)
@@ -295,6 +305,8 @@ def _run_one_seed(seed: int, device: torch.device) -> Dict:
     t_utilization:  Optional[int] = None
     t_entropy:      Optional[int] = None
     t_aux_loss_det: Optional[int] = None
+
+    moewatch_crit_streak: int = 0
 
     for step in range(1, N_STEPS + 1):
         if step == COLLAPSE_STEP:
@@ -312,18 +324,23 @@ def _run_one_seed(seed: int, device: torch.device) -> Dict:
 
         report = watcher.step(global_step=step, current_loss=loss.item())
 
-        if t_moewatch is None:
-            for alert in report.alerts:
-                if alert.level.value in ("warning", "critical"):
-                    t_moewatch = step
-                    break
+        # Require 2 consecutive CRITICAL alerts on the collapse layer,
+        # only counting steps at or after the collapse injection.
+        if t_moewatch is None and step >= COLLAPSE_STEP:
+            has_crit = any(
+                a.level.value == "critical" and a.layer_id == collapse_layer_name
+                for a in report.alerts
+            )
+            moewatch_crit_streak = (moewatch_crit_streak + 1) if has_crit else 0
+            if moewatch_crit_streak >= 2:
+                t_moewatch = step
 
         # Probs cached inside MoEBlock.forward() — no second forward pass
         probs = model.get_cached_routing_probs(COLLAPSE_LAYER)
 
         if t_utilization  is None and _detect_utilization(probs): t_utilization  = step
-        if t_entropy       is None and _detect_entropy(probs):     t_entropy       = step
-        if t_aux_loss_det  is None and _detect_aux_loss(probs):    t_aux_loss_det  = step
+        if t_entropy      is None and _detect_entropy(probs):      t_entropy      = step
+        if t_aux_loss_det is None and _detect_aux_loss(probs):     t_aux_loss_det = step
 
         if all(v is not None for v in (t_moewatch, t_utilization, t_entropy, t_aux_loss_det)):
             break

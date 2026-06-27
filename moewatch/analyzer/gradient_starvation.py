@@ -206,7 +206,7 @@ class GradientStarvationAnalyzer:
         reports: Dict[str, List[GradientStarvationReport]] = {}
 
         try:
-            all_stats = stat_collector.get_all_stats()
+            all_stats = stat_collector.get_all_stats(window=self.config.stats_window)
         except Exception as exc:  # pylint: disable=broad-except
             logger.warning(
                 "[MoEWatch] GradientStarvationAnalyzer.analyze(): failed to "

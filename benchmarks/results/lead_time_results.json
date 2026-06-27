@@ -14,15 +14,15 @@
     "device": "cuda",
     "optimisations": [
       "batched_bmm_dispatch",
+      "modulelist_kept_for_gradient_hooks",
       "routing_prob_cache",
       "sgd_optimizer",
-      "early_exit_per_seed",
-      "parallel_seeds_on_cpu"
+      "early_exit_per_seed"
     ],
     "baselines": {
       "utilization_threshold": 0.7,
       "entropy_threshold": 0.35,
-      "aux_loss_threshold": 0.3
+      "aux_loss_threshold": 3.0
     },
     "environment": {
       "os": "Windows 10.0.26200",
@@ -36,147 +36,147 @@
       "python": "3.13.7"
     }
   },
-  "wall_time_seconds": 559.56,
+  "wall_time_seconds": 2193.73,
   "per_seed": [
     {
       "seed": 0,
       "t_moewatch": null,
       "t_utilization": 80,
       "t_entropy": 80,
-      "t_aux_loss": 1
+      "t_aux_loss": 80
     },
     {
       "seed": 1,
       "t_moewatch": null,
       "t_utilization": 80,
       "t_entropy": 80,
-      "t_aux_loss": 1
+      "t_aux_loss": 80
     },
     {
       "seed": 2,
       "t_moewatch": null,
       "t_utilization": 80,
       "t_entropy": 80,
-      "t_aux_loss": 1
+      "t_aux_loss": 80
     },
     {
       "seed": 3,
       "t_moewatch": null,
       "t_utilization": 80,
       "t_entropy": 80,
-      "t_aux_loss": 1
+      "t_aux_loss": 80
     },
     {
       "seed": 4,
       "t_moewatch": null,
       "t_utilization": 80,
       "t_entropy": 80,
-      "t_aux_loss": 1
+      "t_aux_loss": 80
     },
     {
       "seed": 5,
       "t_moewatch": null,
       "t_utilization": 80,
       "t_entropy": 80,
-      "t_aux_loss": 1
+      "t_aux_loss": 80
     },
     {
       "seed": 6,
       "t_moewatch": null,
       "t_utilization": 80,
       "t_entropy": 80,
-      "t_aux_loss": 1
+      "t_aux_loss": 80
     },
     {
       "seed": 7,
       "t_moewatch": null,
       "t_utilization": 80,
       "t_entropy": 80,
-      "t_aux_loss": 1
+      "t_aux_loss": 80
     },
     {
       "seed": 8,
       "t_moewatch": null,
       "t_utilization": 80,
       "t_entropy": 80,
-      "t_aux_loss": 1
+      "t_aux_loss": 80
     },
     {
       "seed": 9,
       "t_moewatch": null,
       "t_utilization": 80,
       "t_entropy": 80,
-      "t_aux_loss": 1
+      "t_aux_loss": 80
     },
     {
       "seed": 10,
       "t_moewatch": null,
       "t_utilization": 80,
       "t_entropy": 80,
-      "t_aux_loss": 1
+      "t_aux_loss": 80
     },
     {
       "seed": 11,
       "t_moewatch": null,
       "t_utilization": 80,
       "t_entropy": 80,
-      "t_aux_loss": 1
+      "t_aux_loss": 80
     },
     {
       "seed": 12,
       "t_moewatch": null,
       "t_utilization": 80,
       "t_entropy": 80,
-      "t_aux_loss": 1
+      "t_aux_loss": 80
     },
     {
       "seed": 13,
       "t_moewatch": null,
       "t_utilization": 80,
       "t_entropy": 80,
-      "t_aux_loss": 1
+      "t_aux_loss": 80
     },
     {
       "seed": 14,
       "t_moewatch": null,
       "t_utilization": 80,
       "t_entropy": 80,
-      "t_aux_loss": 1
+      "t_aux_loss": 80
     },
     {
       "seed": 15,
       "t_moewatch": null,
       "t_utilization": 80,
       "t_entropy": 80,
-      "t_aux_loss": 1
+      "t_aux_loss": 80
     },
     {
       "seed": 16,
       "t_moewatch": null,
       "t_utilization": 80,
       "t_entropy": 80,
-      "t_aux_loss": 1
+      "t_aux_loss": 80
     },
     {
       "seed": 17,
       "t_moewatch": null,
       "t_utilization": 80,
       "t_entropy": 80,
-      "t_aux_loss": 1
+      "t_aux_loss": 80
     },
     {
       "seed": 18,
       "t_moewatch": null,
       "t_utilization": 80,
       "t_entropy": 80,
-      "t_aux_loss": 1
+      "t_aux_loss": 80
     },
     {
       "seed": 19,
       "t_moewatch": null,
       "t_utilization": 80,
       "t_entropy": 80,
-      "t_aux_loss": 1
+      "t_aux_loss": 80
     }
   ],
   "fire_rates": {
@@ -189,7 +189,7 @@
     "moewatch": null,
     "utilization": 80,
     "entropy": 80,
-    "aux_loss": 1
+    "aux_loss": 80
   },
   "lead_time_advantage": {
     "vs_utilization": {

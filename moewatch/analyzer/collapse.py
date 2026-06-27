@@ -258,7 +258,7 @@ class CollapseDetector:
         reports: Dict[str, LayerCollapseReport] = {}
 
         try:
-            all_stats = stat_collector.get_all_stats()
+            all_stats = stat_collector.get_all_stats(window=self.config.stats_window)
         except Exception as exc:  # pylint: disable=broad-except
             logger.warning(
                 "[MoEWatch] CollapseDetector.analyze(): failed to read stats: %s",

@@ -347,7 +347,7 @@ class EntropyAnalyzer:
 
         # Retrieve current stats snapshot (thread-safe copy).
         try:
-            all_stats = stat_collector.get_all_stats()
+            all_stats = stat_collector.get_all_stats(window=self.config.stats_window)
         except Exception as exc:  # pylint: disable=broad-except
             logger.warning(
                 "[MoEWatch] EntropyAnalyzer.analyze(): failed to read stats "
@@ -406,6 +406,7 @@ class EntropyAnalyzer:
             self._cusum_detectors[layer_name] = CUSUMDetector(
                 threshold=_CUSUM_THRESHOLD,
                 drift=_CUSUM_DRIFT,
+                warmup_steps=self.config.cusum_warmup,
             )
             self._entropy_history[layer_name] = []
             self._expert_counts[layer_name] = 0

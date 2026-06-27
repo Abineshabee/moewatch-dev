@@ -351,6 +351,7 @@ class HookManager:
             layer_name=layer_name,
             stat_collector=self.stat_collector,
             config=self.config,
+            model=self.model,
         )
         handle = router_module.register_forward_hook(hook)
 

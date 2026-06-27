@@ -145,17 +145,19 @@ class RouterForwardHook:
     (``top_k`` / ``num_experts_per_tok``) when present.
     """
 
-    __slots__ = ("layer_name", "stat_collector", "config", "_global_step")
+    __slots__ = ("layer_name", "stat_collector", "config", "_global_step", "_model")
 
     def __init__(
         self,
         layer_name: str,
         stat_collector: "StatCollector",  # noqa: F821 - forward ref, avoids import cycle
         config: WatchConfig,
+        model: "nn.Module | None" = None,
     ) -> None:
         self.layer_name: str = layer_name
         self.stat_collector = stat_collector
         self.config: WatchConfig = config
+        self._model: "nn.Module | None" = model
 
         # Updated externally (by HookManager) before each forward pass so
         # that emitted events carry an accurate training step number.
@@ -237,7 +239,7 @@ class RouterForwardHook:
                 # downstream analyzer efficiency).
                 logits_detached = logits.detach()
 
-                top_k = self._infer_top_k(module, expert_count)
+                top_k = self._infer_top_k(module, expert_count, self._model, self.layer_name)
                 selected_experts = self._select_top_k(logits_detached, top_k)
 
                 batch_size = 1
@@ -335,11 +337,22 @@ class RouterForwardHook:
         return None
 
     @staticmethod
-    def _infer_top_k(module: nn.Module, expert_count: int) -> int:
+    def _infer_top_k(
+        module: nn.Module,
+        expert_count: int,
+        model: "nn.Module | None" = None,
+        layer_name: str = "",
+    ) -> int:
         """Infer the number of experts selected per token (``top_k``).
 
-        Checks common attribute names used by popular MoE implementations
-        before falling back to a conservative default.
+        Checks common attribute names on the gate module first, then walks
+        to the parent MoE block, before falling back to a conservative
+        default of ``k=1``.
+
+        Without the parent-walk, a bare ``nn.Linear`` gate (which carries
+        no ``top_k`` attribute) always produces ``k=1``, making the hook
+        report top-1 routing on a top-8 model — load-imbalance stays near
+        1.0 regardless of how severe the collapse is.
 
         Parameters
         ----------
@@ -347,19 +360,38 @@ class RouterForwardHook:
             The hooked router module, possibly exposing ``top_k`` or
             ``num_experts_per_tok``.
         expert_count : int
-            Total number of experts available in this router, used to
-            clamp the inferred ``top_k`` to a valid range.
+            Total number of experts, used to clamp the result.
+        model : nn.Module or None, optional
+            Root model reference for parent-module resolution.
+        layer_name : str, optional
+            Fully-qualified name of the gate module (e.g.
+            ``"layers.5.mlp.gate"``). Used to derive the parent name
+            ``"layers.5.mlp"`` for the attribute walk.
 
         Returns
         -------
         int
-            The inferred ``top_k`` value, clamped to ``[1, expert_count]``.
-            Defaults to ``1`` (argmax routing) if no attribute is found.
+            The inferred ``top_k`` value clamped to ``[1, expert_count]``.
         """
-        for attr in ("top_k", "num_experts_per_tok", "k"):
+        _ATTRS = ("top_k", "num_experts_per_tok", "k")
+
+        # 1. Check the gate module itself.
+        for attr in _ATTRS:
             value = getattr(module, attr, None)
             if isinstance(value, int) and value > 0:
                 return min(value, expert_count)
+
+        # 2. Walk to parent MoE block and check there.
+        if model is not None and layer_name and "." in layer_name:
+            parent_name = layer_name.rsplit(".", 1)[0]
+            try:
+                parent = model.get_submodule(parent_name)
+                for attr in _ATTRS:
+                    value = getattr(parent, attr, None)
+                    if isinstance(value, int) and value > 0:
+                        return min(value, expert_count)
+            except AttributeError:
+                pass
 
         return min(1, expert_count)
 

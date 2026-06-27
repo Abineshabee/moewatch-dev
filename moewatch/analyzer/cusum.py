@@ -198,6 +198,7 @@ class CUSUMDetector:
         self,
         threshold: float = 5.0,
         drift: float = 1.0,
+        warmup_steps: int = 0,
     ) -> None:
         if threshold <= 0.0:
             raise ValueError(
@@ -209,9 +210,15 @@ class CUSUMDetector:
                 f"[MoEWatch] CUSUMDetector: drift must be >= 0, "
                 f"got {drift}."
             )
+        if warmup_steps < 0:
+            raise ValueError(
+                f"[MoEWatch] CUSUMDetector: warmup_steps must be >= 0, "
+                f"got {warmup_steps}."
+            )
 
         self.threshold: float = float(threshold)
         self.drift: float = float(drift)
+        self.warmup_steps: int = int(warmup_steps)
 
         # Current cumulative sum values (positive and negative directions)
         self._cusum_pos: float = 0.0
@@ -230,6 +237,12 @@ class CUSUMDetector:
     def update(self, value: float) -> bool:
         """Process one observation and return True if a change is detected.
 
+        During the first ``warmup_steps`` calls, observations are processed
+        normally but detection is **suppressed**. At the exact end of the
+        warmup period the cumulative sums are **reset to zero** so that noise
+        accumulated during warmup does not carry over into the detection window
+        and trigger an immediate false positive.
+
         Updates both the positive and negative cumulative sums using the
         CUSUM recursion:
             S_pos[t] = max(0, S_pos[t-1] + (value - drift))
@@ -246,17 +259,37 @@ class CUSUMDetector:
         -------
         bool
             True if either ``S_pos`` or ``S_neg`` exceeds ``threshold``
-            after incorporating this observation. The caller should call
-            ``reset()`` to restart monitoring after a detection.
+            after incorporating this observation, AND at least
+            ``warmup_steps`` observations have been processed. The caller
+            should call ``reset()`` to restart monitoring after a detection.
         """
         if not np.isfinite(value):
             self._n_updates += 1
+            if self.warmup_steps > 0 and self._n_updates == self.warmup_steps:
+                self._cusum_pos = 0.0
+                self._cusum_neg = 0.0
             return False
 
         v = float(value)
         self._cusum_pos = max(0.0, self._cusum_pos + (v - self.drift))
         self._cusum_neg = max(0.0, self._cusum_neg + (-v - self.drift))
         self._n_updates += 1
+
+        # At the exact end of warmup, reset sums to zero so accumulated
+        # early-training noise does not carry into the detection window.
+        if self.warmup_steps > 0 and self._n_updates == self.warmup_steps:
+            self._cusum_pos = 0.0
+            self._cusum_neg = 0.0
+            logger.debug(
+                "[MoEWatch] CUSUMDetector: warmup complete at update %d; "
+                "sums reset to zero.",
+                self._n_updates,
+            )
+            return False
+
+        # Suppress detection during warmup.
+        if self._n_updates <= self.warmup_steps:
+            return False
 
         if self._cusum_pos > self.threshold or self._cusum_neg > self.threshold:
             self._last_detection_step = self._n_updates - 1

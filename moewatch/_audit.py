@@ -384,24 +384,30 @@ def _resolve_device(device: str) -> str:
     """Validate and normalize the device string.
 
     Checks that CUDA is available when a ``cuda`` device is requested.
-    Falls back to ``"cpu"`` with a warning rather than raising, so that
-    audit runs on CPU-only machines that may have ``config.device = "cuda"``
-    set by default.
+    Falls back to ``"cpu"`` with a warning when the bare ``"cuda"`` string
+    is used on a CPU-only machine (common when a config default carries over
+    from a GPU environment).  However, when an **explicit CUDA device index**
+    is given (e.g. ``"cuda:0"``, ``"cuda:999"``) the intent is unambiguous —
+    that specific device is required — so a ``RuntimeError`` is raised rather
+    than silently falling back to CPU.
 
     Parameters
     ----------
     device : str
-        Torch device string from the caller (e.g. ``"cpu"``, ``"cuda"``).
+        Torch device string from the caller (e.g. ``"cpu"``, ``"cuda"``,
+        ``"cuda:0"``).
 
     Returns
     -------
     str
-        Validated device string, possibly downgraded to ``"cpu"``.
+        Validated device string, possibly downgraded to ``"cpu"`` only when
+        the bare ``"cuda"`` string is requested on a CPU-only machine.
 
     Raises
     ------
     RuntimeError
-        If the device string cannot be parsed by PyTorch at all.
+        If the device string cannot be parsed by PyTorch, or if an explicit
+        CUDA device index is requested but CUDA is unavailable.
     """
     try:
         resolved = torch.device(device)
@@ -411,6 +417,16 @@ def _resolve_device(device: str) -> str:
         ) from exc
 
     if resolved.type == "cuda" and not torch.cuda.is_available():
+        # An explicit index (cuda:N) is an unambiguous request for a
+        # specific device — raise rather than silently falling back.
+        if resolved.index is not None:
+            raise RuntimeError(
+                f"[MoEWatch] CUDA device {device!r} requested but CUDA is "
+                "not available on this machine. Use device='cpu' or install "
+                "a CUDA-enabled build of PyTorch."
+            )
+        # Bare "cuda" without an index: warn and fall back to CPU so that
+        # a config default from a GPU environment still works on CPU-only.
         warnings.warn(
             f"[MoEWatch] CUDA device {device!r} requested but CUDA is not "
             "available. Falling back to CPU. Install CUDA or pass "

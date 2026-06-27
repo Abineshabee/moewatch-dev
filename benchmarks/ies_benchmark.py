@@ -328,16 +328,28 @@ def _run(
     from moewatch import MoEWatch
     from moewatch.config import WatchConfig, OutputMode
 
+    _common_config = dict(
+        output=OutputMode.SILENT,
+        sample_every=1,
+        log_every=1,
+        # gradient health — calibrated for hidden_dim=64, top-8/64
+        dead_threshold=0.002,
+        cold_threshold=0.008,
+        # imbalance thresholds
+        load_imbalance_warn=2.5,
+        load_imbalance_error=4.0,
+        # fast-response rolling window
+        stats_window=20,
+        # suppress CUSUM false-positives before collapse window
+        cusum_warmup=COLLAPSE_STEP - 5,
+    )
+
     if action_type is not None:
         config = WatchConfig(
-            output=OutputMode.SILENT,
-            sample_every=1,
-            log_every=1,
+            **_common_config,
             intervention_enabled=True,
             intervention_cooldown=5,
             intervention_max_delta=0.5,
-            dead_threshold=0.0005,
-            cold_threshold=0.002,
         )
         watcher = MoEWatch(model=model, config=config)
         # Inject the forced policy after attach() so it overrides the default
@@ -350,12 +362,8 @@ def _run(
         watcher.policy = forced_policy
     else:
         config = WatchConfig(
-            output=OutputMode.SILENT,
-            sample_every=1,
-            log_every=1,
+            **_common_config,
             intervention_enabled=False,
-            dead_threshold=0.0005,
-            cold_threshold=0.002,
         )
         watcher = MoEWatch(model=model, config=config)
         trainer = _DummyTrainer(model)

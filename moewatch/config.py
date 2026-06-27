@@ -266,6 +266,31 @@ class WatchConfig:
     Default: 10.
     """
 
+    stats_window: int = 100
+    """Rolling window length (in steps) for load-imbalance and entropy stats.
+
+    All analyzers pass this as the ``window`` argument to
+    ``StatCollector.get_all_stats()``. A shorter window makes the
+    load-imbalance ratio and entropy metrics react faster to collapse
+    events at the cost of higher step-to-step variance. The default
+    of 100 suits production runs of 1 000+ steps; for shorter benchmarks
+    or fast-iteration experiments, values of 20–50 give quicker response.
+    Default: 100.
+    """
+
+    cusum_warmup: int = 0
+    """Number of CUSUM updates to discard before enabling change detection.
+
+    During the first ``cusum_warmup`` calls to ``CUSUMDetector.update()``,
+    observations are still processed (so the internal state reflects the
+    real signal), but the return value is forced to ``False`` and the
+    cumulative sums are **reset to zero** at the end of the warmup period.
+    This prevents entropy fluctuations from natural early-training weight
+    updates (before any collapse is possible) from accumulating into a
+    false-positive detection event. Set to roughly the number of steps
+    before the earliest expected collapse. Default: 0 (no warmup).
+    """
+
     output: OutputMode = OutputMode.CLI
     """Output format for monitoring reports.
 
@@ -489,6 +514,10 @@ class WatchConfig:
             raise ValueError(f"log_every must be >= 1, got {self.log_every}")
         if self.sample_every < 1:
             raise ValueError(f"sample_every must be >= 1, got {self.sample_every}")
+        if self.stats_window < 1:
+            raise ValueError(f"stats_window must be >= 1, got {self.stats_window}")
+        if self.cusum_warmup < 0:
+            raise ValueError(f"cusum_warmup must be >= 0, got {self.cusum_warmup}")
 
         # Bandit parameters
         if not (0.0 <= self.bandit_epsilon <= 1.0):
