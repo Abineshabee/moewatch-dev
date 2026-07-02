@@ -615,12 +615,48 @@ class MoEWatch:
                 # Get per-layer reports (use stubs if analyzer produced no output)
                 ent_report = entropy_reports.get(layer_name)
                 grad_layer_reports = gradient_reports.get(layer_name, [])
-                # Use the worst-case expert report (highest starvation_score)
-                grad_report = (
-                    max(grad_layer_reports, key=lambda r: r.starvation_score)
-                    if grad_layer_reports
-                    else None
-                )
+
+                # Select the worst-case expert gradient report for Tier 1.
+                #
+                # Naive max(starvation_score) fails when experts with truly
+                # zero gradient norms return starvation_score=0.0 because
+                # _MIN_SAMPLES_FOR_DETECTION hasn't been reached yet or the
+                # early-exit zero-norm path wasn't triggered. Their score
+                # looks "healthy" (0.0) but they are actually dead.
+                #
+                # Priority order:
+                #   1. Confirmed-dead: hook fired (n_samples>=1) AND norm=0.0
+                #      → starvation_score=1.0 by definition
+                #   2. Has data: pick worst starvation_score among reports
+                #      that have at least one sample
+                #   3. Last resort: naive max over all reports
+                grad_report = None
+                if grad_layer_reports:
+                    confirmed_dead = [
+                        r for r in grad_layer_reports
+                        if getattr(r, "n_samples", 0) >= 1
+                        and getattr(r, "gradient_norm_mean", -1.0) == 0.0
+                    ]
+                    if confirmed_dead:
+                        grad_report = max(
+                            confirmed_dead,
+                            key=lambda r: getattr(r, "n_samples", 0),
+                        )
+                    else:
+                        has_data = [
+                            r for r in grad_layer_reports
+                            if getattr(r, "n_samples", 0) >= 1
+                        ]
+                        if has_data:
+                            grad_report = max(
+                                has_data,
+                                key=lambda r: r.starvation_score,
+                            )
+                        else:
+                            grad_report = max(
+                                grad_layer_reports,
+                                key=lambda r: r.starvation_score,
+                            )
 
                 if ent_report is None or grad_report is None:
                     continue
