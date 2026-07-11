@@ -358,7 +358,24 @@ class GradientStarvationAnalyzer:
         if below_cold:
             counter_map[expert_id] += 1
             if onset_map[expert_id] is None:
-                onset_map[expert_id] = step
+                # Determine the onset step as accurately as possible.
+                #
+                # When ALL n_samples in the window are zero, starvation
+                # started before the window — back-calculate to the first
+                # event in the buffer: step - (n_samples - 1).
+                # Example: step=2, n_samples=3 (all zero since step 0)
+                #          → onset = 2 - 2 = 0  ✓
+                #
+                # When only the RECENT tail is zero (expert died mid-run),
+                # we can't back-calculate precisely without per-event steps
+                # in GradientStats. Record the current step as a conservative
+                # upper bound — at most _MIN_SAMPLES_FOR_DETECTION steps late.
+                all_zero = (norm_mean == 0.0)
+                if all_zero:
+                    onset_step = max(0, step - (n_samples - 1))
+                else:
+                    onset_step = step
+                onset_map[expert_id] = onset_step
                 logger.debug(
                     "[MoEWatch] GradientStarvationAnalyzer: expert %d in "
                     "'%s' fell below cold threshold at step %d "
