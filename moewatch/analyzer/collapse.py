@@ -374,12 +374,6 @@ class CollapseDetector:
         # of tokens under uniform routing (1/n_experts).
         cold_util_threshold = (1.0 / n_experts) * 0.5
 
-        # An expert is instantly dead when utilization is near zero —
-        # below 5% of fair share. This fast-path bypasses cold_steps_limit
-        # so that a fully-collapsed expert (util=0) is classified DEAD
-        # immediately rather than waiting for cold_steps_limit steps.
-        dead_util_threshold = (1.0 / n_experts) * 0.05
-
         for expert_id in range(n_experts):
             util = util_list[expert_id] if expert_id < len(util_list) else 0.0
             tokens = token_list[expert_id] if expert_id < len(token_list) else 0
@@ -408,33 +402,20 @@ class CollapseDetector:
                 state.consecutive_cold_steps = 0
                 state.cold_onset_step = None
 
-            elif util <= dead_util_threshold:
-                # Expert is at near-zero utilization — instantly DEAD.
-                # Fast-path: bypass cold_steps_limit for fully-collapsed experts.
-                if state.status != ExpertStatus.DEAD:
-                    logger.info(
-                        "[MoEWatch] CollapseDetector: expert %d in '%s' "
-                        "instantly promoted to DEAD (util=%.6f <= dead_util_threshold=%.6f).",
-                        expert_id,
-                        layer_name,
-                        util,
-                        dead_util_threshold,
-                    )
-                state.status = ExpertStatus.DEAD
-                state.consecutive_cold_steps = 0
-
             else:
-                # Expert is at or below cold threshold.
-                if state.status == ExpertStatus.HEALTHY or state.status == ExpertStatus.UNKNOWN:
-                    # First step entering COLD.
+                # Expert is at or below cold threshold (includes zero util).
+                # Always go through the cold_steps_limit state machine —
+                # the near-zero instant-DEAD fast-path was removed because
+                # it bypassed the COLD state and broke the contract:
+                #   UNKNOWN/HEALTHY → COLD → DEAD (after cold_steps_limit).
+                # Zero utilization is simply very cold; promotion happens
+                # after cold_steps_limit consecutive cold steps.
+                if state.status in (ExpertStatus.HEALTHY, ExpertStatus.UNKNOWN):
                     state.cold_onset_step = step
                     logger.debug(
                         "[MoEWatch] CollapseDetector: expert %d in '%s' "
                         "entered COLD at step %d (util=%.4f).",
-                        expert_id,
-                        layer_name,
-                        step,
-                        util,
+                        expert_id, layer_name, step, util,
                     )
 
                 state.status = ExpertStatus.COLD
@@ -446,9 +427,7 @@ class CollapseDetector:
                     logger.info(
                         "[MoEWatch] CollapseDetector: expert %d in '%s' "
                         "promoted to DEAD after %d consecutive cold steps.",
-                        expert_id,
-                        layer_name,
-                        state.consecutive_cold_steps,
+                        expert_id, layer_name, state.consecutive_cold_steps,
                     )
 
         # ------------------------------------------------------------------
