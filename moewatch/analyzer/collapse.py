@@ -374,7 +374,10 @@ class CollapseDetector:
         # of tokens under uniform routing (1/n_experts).
         cold_util_threshold = (1.0 / n_experts) * 0.5
 
-        # An expert is dead-level when utilization is near zero.
+        # An expert is instantly dead when utilization is near zero —
+        # below 5% of fair share. This fast-path bypasses cold_steps_limit
+        # so that a fully-collapsed expert (util=0) is classified DEAD
+        # immediately rather than waiting for cold_steps_limit steps.
         dead_util_threshold = (1.0 / n_experts) * 0.05
 
         for expert_id in range(n_experts):
@@ -404,6 +407,21 @@ class CollapseDetector:
                 state.status = ExpertStatus.HEALTHY
                 state.consecutive_cold_steps = 0
                 state.cold_onset_step = None
+
+            elif util <= dead_util_threshold:
+                # Expert is at near-zero utilization — instantly DEAD.
+                # Fast-path: bypass cold_steps_limit for fully-collapsed experts.
+                if state.status != ExpertStatus.DEAD:
+                    logger.info(
+                        "[MoEWatch] CollapseDetector: expert %d in '%s' "
+                        "instantly promoted to DEAD (util=%.6f <= dead_util_threshold=%.6f).",
+                        expert_id,
+                        layer_name,
+                        util,
+                        dead_util_threshold,
+                    )
+                state.status = ExpertStatus.DEAD
+                state.consecutive_cold_steps = 0
 
             else:
                 # Expert is at or below cold threshold.
@@ -499,17 +517,19 @@ class CollapseDetector:
         dead_fraction = num_dead / n_experts
         cold_fraction = num_cold / n_experts
 
-        # Critical: any dead expert, severe imbalance, or majority cold.
+        # Critical: majority dead, any dead with severe imbalance, or majority cold.
         if (
-            num_dead > 0
-            or load_imbalance_ratio >= self.config.load_imbalance_error
+            dead_fraction >= 0.25
+            or (num_dead > 0 and load_imbalance_ratio >= self.config.load_imbalance_error)
             or cold_fraction >= 0.5
         ):
             return "CRITICAL"
 
-        # Degraded: some cold experts or elevated imbalance.
+        # Degraded: any dead expert (below critical threshold), some cold,
+        # or elevated imbalance.
         if (
-            num_cold > 0
+            num_dead > 0
+            or num_cold > 0
             or load_imbalance_ratio >= self.config.load_imbalance_warn
             or cold_fraction > 0.1
         ):
