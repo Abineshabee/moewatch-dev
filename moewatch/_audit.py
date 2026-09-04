@@ -359,7 +359,39 @@ def audit(
     )
 
     # ------------------------------------------------------------------
-    # 7. Build and return AuditReport
+    # 7. Generate alerts from analysis results (mirrors live monitoring)
+    # ------------------------------------------------------------------
+    from moewatch import Alert
+    from moewatch.config import AlertLevel
+
+    audit_alerts = []
+    for layer_name, ent in entropy_results.items():
+        norm_ent = ent.normalized_entropy
+        if norm_ent < config.entropy_critical:
+            audit_alerts.append(Alert(
+                step=0, level=AlertLevel.CRITICAL, layer_id=layer_name,
+                signal_type="entropy_drift",
+                message=f"Normalized entropy critically low ({norm_ent:.4f}).",
+                metrics={"normalized_entropy": norm_ent},
+            ))
+        elif norm_ent < config.entropy_warn or ent.drift_detected:
+            audit_alerts.append(Alert(
+                step=0, level=AlertLevel.WARNING, layer_id=layer_name,
+                signal_type="entropy_drift",
+                message=f"Normalized entropy below warning threshold ({norm_ent:.4f}).",
+                metrics={"normalized_entropy": norm_ent},
+            ))
+    for layer_name, col in collapse_results.items():
+        if col.num_dead_experts > 0:
+            audit_alerts.append(Alert(
+                step=0, level=AlertLevel.CRITICAL, layer_id=layer_name,
+                signal_type="expert_dead",
+                message=f"{col.num_dead_experts} expert(s) DEAD in '{layer_name}'.",
+                metrics={"num_dead_experts": float(col.num_dead_experts)},
+            ))
+
+    # ------------------------------------------------------------------
+    # 8. Build and return AuditReport
     # ------------------------------------------------------------------
     return AuditReport(
         model_name=model_name,
@@ -372,6 +404,7 @@ def audit(
         risk_scores=risk_score_results,
         dead_experts_count=dead_experts_count,
         critical_layers=critical_layers,
+        alerts=audit_alerts,
     )
 
 
@@ -689,6 +722,11 @@ def _run_single_forward(
         if isinstance(batch, dict):
             output = model(**batch)
         elif isinstance(batch, (list, tuple)):
+            # Common convention: (input_tensor, label_tensor).
+            # Try full unpack first; if the model rejects extra args (e.g. a
+            # monitoring-only forward(x) that takes one positional), fall
+            # through to the TypeError handler below which retries with only
+            # the first tensor — which is invariably the model input.
             output = model(*batch)
         else:
             output = model(batch)
@@ -696,10 +734,12 @@ def _run_single_forward(
     except TypeError as exc:
         logger.debug(
             "[MoEWatch] Forward pass call convention mismatch (%s). "
-            "Retrying with positional arg.",
+            "Retrying with first element only (batch may be an (input, label) tuple).",
             exc,
         )
-        output = model(batch)
+        # Unpack the first element for (input, label) style batches.
+        first = batch[0] if isinstance(batch, (list, tuple)) else batch
+        output = model(first)
 
     return output if return_output else None
 

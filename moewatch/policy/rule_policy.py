@@ -465,12 +465,39 @@ class RulePolicy(PolicyBase):
         repeat_limit = (
             _CASCADE_CRITICAL_REPEAT_LIMIT if is_critical_risk else _CASCADE_REPEAT_LIMIT
         )
-        if list(history).count(candidate) >= repeat_limit:
-            return self._downgrade(candidate)
+        # Use > for critical risk so the guard never fires when the window
+        # is exactly full of the same critical action (all 5 entries ==
+        # expert_dropout is correct during active collapse, not a cascade).
+        # For non-critical risk, keep >= so the guard fires after exactly
+        # _CASCADE_REPEAT_LIMIT consecutive same-action steps.
+        count = list(history).count(candidate)
+        if is_critical_risk:
+            if count > repeat_limit:
+                return self._downgrade(candidate)
+        else:
+            if count >= repeat_limit:
+                return self._downgrade(candidate)
 
-        # Oscillation guard: about to flip back to an action just left.
-        if len(history) >= 2 and history[-1] == candidate and history[-2] != candidate:
-            return self._downgrade(candidate)
+        # Oscillation guard: detect strict A,B,A,B alternation across at
+        # least 4 entries in the history window.
+        #
+        # BUG FIX: The previous guard fired on any pattern where
+        # history[-1] == candidate and history[-2] != candidate — e.g.
+        # [noop, noop, aux_loss] + aux_loss would fire because history[-1]
+        # was 'aux_loss' and history[-2] was 'noop'. This is NOT oscillation;
+        # it is a normal risk escalation (noop was correct when risk was low,
+        # aux_loss is correct now that risk climbed). True oscillation is
+        # A,B,A,B — a strict two-action alternation across multiple steps.
+        #
+        # Require at least 4 history entries and check that they form a
+        # strict alternating pair, i.e. the last 4 are [X, Y, X, Y] where
+        # X != Y and Y == candidate (about to repeat the flip).
+        if len(history) >= 4:
+            h = list(history)
+            a, b = h[-4], h[-3]
+            # Strict alternation: last 4 entries must be [a, b, a, b]
+            if (a == h[-2] and b == h[-1] and a != b and b == candidate):
+                return self._downgrade(candidate)
 
         return candidate
 

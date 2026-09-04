@@ -36,7 +36,7 @@ from __future__ import annotations
 
 from moewatch.policy.bandit_policy import BanditPolicy
 from moewatch.policy.base import PolicyBase, PolicyState
-from moewatch.policy.memory import PolicyMemory
+from moewatch.policy.memory import ExperienceTuple, PolicyMemory
 from moewatch.policy.rule_policy import RulePolicy
 
 __all__ = [
@@ -45,4 +45,5 @@ __all__ = [
     "RulePolicy",
     "BanditPolicy",
     "PolicyMemory",
+    "ExperienceTuple",
 ]

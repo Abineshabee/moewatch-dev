@@ -451,10 +451,22 @@ class MoEWatch:
         ImportError
             If HuggingFace Transformers is not installed.
         """
+        # Guard: warn when transformers is absent AND the trainer looks like a
+        # real HuggingFace Trainer (has a `train` method but no `add_callback`
+        # method from a stub/mock). Duck-typed custom trainers that implement
+        # `add_callback` are accepted without transformers.
         if not _TRANSFORMERS_AVAILABLE:
-            raise ImportError(
-                "[MoEWatch] attach() requires HuggingFace Transformers.\n"
-                "Install with: pip install transformers>=4.35"
+            if not hasattr(trainer, "add_callback"):
+                raise ImportError(
+                    "[MoEWatch] attach() requires HuggingFace Transformers "
+                    "when using a real Trainer without an `add_callback` method.\n"
+                    "Install with: pip install transformers>=4.35"
+                )
+            logger.warning(
+                "[MoEWatch] HuggingFace Transformers not installed; "
+                "attach() is proceeding with a duck-typed trainer that "
+                "implements add_callback(). Full Trainer integration "
+                "(on_step_end, on_train_end callbacks) requires transformers."
             )
 
         self._trainer = trainer

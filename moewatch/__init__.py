@@ -262,7 +262,11 @@ def __getattr__(name: str) -> Any:
     """
     if name in ("MoEWatch", "MoEWatchCallback"):
         _require_torch(name)
-        _require_transformers(name)
+        # Note: _require_transformers is intentionally NOT called here.
+        # _watcher.py provides a stub TrainerCallback when transformers is
+        # absent, so MoEWatch and MoEWatchCallback can be imported and used
+        # (e.g. with a custom trainer or for step()-driven monitoring).
+        # The hard dependency on transformers is enforced inside attach().
         from moewatch._watcher import MoEWatch as _MoEWatch
         from moewatch._watcher import MoEWatchCallback as _MoEWatchCallback
 

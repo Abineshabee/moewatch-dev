@@ -100,12 +100,14 @@ class RiskLevel(Enum):
     CRITICAL = "CRITICAL"
 
 
-# Risk score thresholds separating the four levels.
-_LEVEL_THRESHOLDS: Dict[float, RiskLevel] = {
-    0.3: RiskLevel.LOW,
-    0.6: RiskLevel.MID,
-    0.8: RiskLevel.HIGH,
-}
+# Risk score thresholds (inclusive lower bounds).
+# _classify_level() iterates this in descending order so the first match wins.
+# Single source of truth — edit here to change all boundaries simultaneously.
+_LEVEL_THRESHOLDS: list = [
+    (0.8, RiskLevel.CRITICAL),
+    (0.6, RiskLevel.HIGH),
+    (0.3, RiskLevel.MID),
+]
 
 # Default fusion weights (must sum to 1.0).
 _DEFAULT_WEIGHTS: Dict[str, float] = {
@@ -426,6 +428,9 @@ class RiskScoreFuser:
     def _classify_level(risk_score: float) -> RiskLevel:
         """Map a risk score to a categorical RiskLevel.
 
+        Uses ``_LEVEL_THRESHOLDS`` as the single source of truth for
+        boundaries, iterating in descending order so the first match wins.
+
         Parameters
         ----------
         risk_score : float
@@ -435,12 +440,9 @@ class RiskScoreFuser:
         -------
         RiskLevel
         """
-        if risk_score > 0.8:
-            return RiskLevel.CRITICAL
-        if risk_score >= 0.6:
-            return RiskLevel.HIGH
-        if risk_score >= 0.3:
-            return RiskLevel.MID
+        for threshold, level in _LEVEL_THRESHOLDS:
+            if risk_score >= threshold:
+                return level
         return RiskLevel.LOW
 
     def _resolve_weights(

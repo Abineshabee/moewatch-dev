@@ -173,6 +173,10 @@ class AuditReport:
     critical_layers : list[str]
         List of layer names where ``risk_level == CRITICAL``.
         Derived from ``risk_scores`` at construction time.
+    alerts : list[Alert]
+        Threshold-crossing alerts generated during the audit pass,
+        mirroring the ``MoEWatch.alerts`` list from live monitoring.
+        Populated from entropy, collapse, and risk score analysis results.
     """
 
     # Core metadata
@@ -192,6 +196,7 @@ class AuditReport:
     # Derived summary fields (computed by _audit.py before construction)
     dead_experts_count: int = 0
     critical_layers: List[str] = field(default_factory=list)
+    alerts: List = field(default_factory=list)  # List[Alert] — avoids circular import
 
     # ------------------------------------------------------------------
     # Read-only derived properties

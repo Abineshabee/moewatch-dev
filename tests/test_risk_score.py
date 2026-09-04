@@ -455,13 +455,17 @@ class TestRiskScoreFuserClassification:
         """High risk scores → RiskLevel.HIGH."""
         fuser = RiskScoreFuser(risk_config)
 
+        # starvation=0.7, normalized_entropy=0.3 → T1=0.6*0.7=0.42, T2=0.3*0.7=0.21
+        # (no T3) → risk_score ≈ 0.63 which is in [0.6, 0.8) = HIGH.
+        # Note: 0.8 is the CRITICAL boundary (inclusive), so inputs that fuse
+        # to exactly 0.8 now correctly return CRITICAL (boundary bug fix).
         gradient_report = type("Report", (), {
-            "starvation_score": 0.8,
+            "starvation_score": 0.7,
             "layer_name": "layer.0.gate",
             "step": 0,
         })()
         entropy_report = type("Report", (), {
-            "normalized_entropy": 0.2,  # Low entropy
+            "normalized_entropy": 0.3,  # Moderately low entropy
             "drift_detected": False,
             "step": 0,
         })()
