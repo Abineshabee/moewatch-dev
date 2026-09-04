@@ -1,2 +1,3 @@
-#MoEWatch -v0.2.0 (Under Development)
-R&D and Benchmark&Testing
+# MoEWatch v0.2.0 (Under Development)
+
+MoEWatch is an experimental framework for Mixture of Experts research, benchmarking, and testing — currently focused on R&D and performance evaluation.
