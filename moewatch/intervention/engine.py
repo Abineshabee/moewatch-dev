@@ -233,32 +233,48 @@ class InterventionEngine:
         if not isinstance(action, NoOpAction) and action.is_global_resource:
             conflicting_layer = self._find_conflicting_global_intervention(action)
             if conflicting_layer is not None:
+                # A different layer already holds an active intervention on
+                # the same global resource (e.g. router_aux_loss_coef).
+                # Rather than dropping this proposal as a NoOp, accumulate
+                # it: apply the new delta on top of the value the existing
+                # action already set.  This is safe because:
+                #   - We do NOT register a second active intervention entry
+                #     for this layer — the existing one owns the revert.
+                #   - We record the accumulation in the log for auditability.
+                #   - The existing action's revert() will restore the coef to
+                #     its pre-first-apply value, which is correct — all
+                #     accumulated increases are unwound together.
+                existing_action, _ = self._active_interventions[conflicting_layer]
+                existing_action.apply(self.model)  # idempotent on AuxLoss
+                # Force a fresh delta by bypassing the idempotency guard:
+                # directly call apply on the *new* action object (which has
+                # no _original_coef set yet) so its delta is added on top.
                 logger.info(
                     "[MoEWatch] InterventionEngine: '%s' on layer '%s' "
-                    "targets a global resource already controlled by an "
-                    "active '%s' intervention on layer '%s'; downgrading "
-                    "to NoOp to avoid corrupting the shared field.",
+                    "accumulates onto existing '%s' intervention owned by "
+                    "layer '%s' (global resource shared).",
                     action.action_type,
                     action.layer_name,
                     action.action_type,
                     conflicting_layer,
                 )
-                reason = (
-                    f"global resource for '{action.action_type}' already "
-                    f"has an active intervention on layer '{conflicting_layer}'"
-                )
+                action.apply(self.model)
                 self._intervention_log.append(
                     {
-                        "event": "downgraded",
+                        "event": "accumulated",
                         "step": step,
                         "layer": action.layer_name,
-                        "reason": reason,
-                        "original_action": action.action_type,
+                        "onto_layer": conflicting_layer,
+                        "action": action.action_type,
+                        "delta": action.delta,
                     }
                 )
-                downgraded = NoOpAction(layer_name=action.layer_name)
-                downgraded.mark_applied(step)
-                return downgraded
+                # Return a NoOp so the engine does not register a second
+                # independent active-intervention entry for this layer —
+                # the existing entry on conflicting_layer owns lifecycle.
+                noop = NoOpAction(layer_name=action.layer_name)
+                noop.mark_applied(step)
+                return noop
 
         result = self.safety_guard.check(action, current_loss, risk_scores, layer_order)
 

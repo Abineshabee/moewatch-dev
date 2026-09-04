@@ -1,0 +1,24 @@
+Metadata-Version: 2.4
+Name: moewatch
+Version: 0.2.0
+Summary: Real-time MoE routing health monitor with gradient starvation detection, risk scoring, and automated intervention for HuggingFace models
+Author-email: Abinesh N <abineshabee@gmail.com>
+License: Apache-2.0
+Project-URL: Homepage, https://github.com/Abineshabee/moewatch
+Project-URL: Repository, https://github.com/Abineshabee/moewatch
+Project-URL: Issues, https://github.com/Abineshabee/moewatch/issues
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: torch>=2.0
+Requires-Dist: transformers>=4.35
+Requires-Dist: numpy>=1.24
+Requires-Dist: rich>=13.0
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0; extra == "dev"
+Requires-Dist: pytest-cov>=4.0; extra == "dev"
+Provides-Extra: full
+Requires-Dist: pandas; extra == "full"
+Requires-Dist: scipy; extra == "full"
+Requires-Dist: scikit-learn; extra == "full"
+Dynamic: license-file

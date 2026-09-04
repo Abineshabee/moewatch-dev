@@ -515,9 +515,29 @@ class AuxLossAction(InterventionAction):
         return config
 
     def _find_coef_attr(self, config: Any) -> Optional[str]:
-        """Return the first recognised coefficient attribute present."""
+        """Return the first recognised coefficient attribute whose value is
+        a real numeric scalar (``int`` or ``float``).
+
+        ``hasattr`` alone is insufficient when ``config`` is a
+        ``unittest.mock.MagicMock``: MagicMock returns ``True`` for
+        *every* ``hasattr`` check, and ``getattr`` on an unseen attribute
+        returns a fresh child Mock — not a float.  We therefore call
+        ``getattr`` and verify the returned value is actually numeric
+        before accepting the attribute.  This makes AuxLossAction work
+        correctly whether ``model.config`` is a real HuggingFace config
+        object, a plain namespace, or a MagicMock whose targeted attribute
+        was pre-seeded with a real float (e.g. ``mock.router_aux_loss_coef
+        = 0.0``).
+        """
         for attr in self._COEF_ATTRS:
-            if hasattr(config, attr):
+            if not hasattr(config, attr):
+                continue
+            val = getattr(config, attr)
+            # Must be a real numeric scalar — MagicMock implements __float__
+            # and returns 1.0 without raising, so float() alone cannot
+            # distinguish a genuine float from a Mock child attribute.
+            # isinstance is the only reliable gate here.
+            if isinstance(val, (int, float)):
                 return attr
         return None
 

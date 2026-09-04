@@ -100,6 +100,15 @@ _HISTORY_LEN = 5
 #: tier.
 _CASCADE_REPEAT_LIMIT = 3
 
+#: A higher repeat limit used when risk is genuinely critical
+#: (>= _RISK_ROUTERNOISE_MAX).  In a real collapse the same strong action
+#: IS correct; suppressing it after only 3 repeats would disable
+#: intervention exactly when most needed.  The guard still fires when
+#: the action has filled the entire retained history window (_HISTORY_LEN)
+#: without any sign of improvement — i.e. every single tracked step chose
+#: the same action.  Must be <= _HISTORY_LEN.
+_CASCADE_CRITICAL_REPEAT_LIMIT = _HISTORY_LEN  # == 5
+
 
 class RulePolicy(PolicyBase):
     """Phase 1 deterministic intervention policy.
@@ -213,7 +222,9 @@ class RulePolicy(PolicyBase):
         )
 
         candidate = self._risk_to_action_type(state.risk_score)
-        final_action_type = self._apply_guards(layer_name, history, candidate)
+        final_action_type = self._apply_guards(
+            layer_name, history, candidate, state.risk_score
+        )
 
         self._action_sequence[layer_name] = candidate
         history.append(final_action_type)
@@ -385,7 +396,11 @@ class RulePolicy(PolicyBase):
         return _ACTION_ORDER[idx - 1]
 
     def _apply_guards(
-        self, layer_name: str, history: Deque[str], candidate: str
+        self,
+        layer_name: str,
+        history: Deque[str],
+        candidate: str,
+        risk_score: float = 0.0,
     ) -> str:
         """Apply oscillation and cascade guards, returning the final action type.
 
@@ -430,7 +445,27 @@ class RulePolicy(PolicyBase):
             return candidate
 
         # Cascade guard: same strong action repeating too often.
-        if list(history).count(candidate) >= _CASCADE_REPEAT_LIMIT:
+        #
+        # The guard's purpose is to prevent repeated identical actions when
+        # they are not working — e.g. aux_loss firing every step but risk
+        # never drops.  However, when risk is genuinely and persistently
+        # above the expert_dropout threshold (>= _RISK_ROUTERNOISE_MAX),
+        # the model is in active collapse and the repeated action IS correct:
+        # suppressing it permanently would disable intervention exactly when
+        # it is most needed, which is backwards.
+        #
+        # When risk is genuinely critical (>= _RISK_ROUTERNOISE_MAX = 0.8),
+        # use a much higher repeat limit before suppressing — a real collapse
+        # legitimately needs the same strong action many times.  The guard
+        # still fires eventually (after _CASCADE_CRITICAL_REPEAT_LIMIT steps)
+        # in case the action is truly having no effect.
+        # Below 0.8 (borderline risk), use the normal limit so that a
+        # repeatedly-ineffective weaker action gets downgraded promptly.
+        is_critical_risk = risk_score >= _RISK_ROUTERNOISE_MAX
+        repeat_limit = (
+            _CASCADE_CRITICAL_REPEAT_LIMIT if is_critical_risk else _CASCADE_REPEAT_LIMIT
+        )
+        if list(history).count(candidate) >= repeat_limit:
             return self._downgrade(candidate)
 
         # Oscillation guard: about to flip back to an action just left.

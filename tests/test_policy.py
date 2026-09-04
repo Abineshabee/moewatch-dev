@@ -69,6 +69,7 @@ from moewatch.policy.rule_policy import (
     _RISK_NOOP_MAX,
     _RISK_ROUTERNOISE_MAX,
     _CASCADE_REPEAT_LIMIT,
+    _CASCADE_CRITICAL_REPEAT_LIMIT,
 )
 
 
@@ -254,21 +255,45 @@ class TestSelectActionThresholds:
 class TestCascadeGuard:
     def test_cascade_guard_downgrades_repeated_action(self) -> None:
         """
-        If expert_dropout fires _CASCADE_REPEAT_LIMIT times in a row,
-        the (LIMIT+1)th call should be downgraded.
+        When risk is critical (>= 0.8, expert_dropout tier), the cascade
+        guard uses _CASCADE_CRITICAL_REPEAT_LIMIT instead of the normal
+        _CASCADE_REPEAT_LIMIT.  This lets MoEWatch keep applying the
+        strongest action during a genuine collapse without being suppressed
+        too early, while still eventually downgrading if the action has
+        zero effect.
+
+        Test uses a borderline risk (0.7, router_noise tier) to verify the
+        normal _CASCADE_REPEAT_LIMIT fires for non-critical risk.
         """
+        # --- Normal-risk cascade (risk=0.7, router_noise tier) ---
         policy = _policy()
         actions = []
         for step in range(_CASCADE_REPEAT_LIMIT + 2):
-            a = policy.select_action(_state(0.9, layer_id=0, step=step))
+            a = policy.select_action(_state(0.7, layer_id=0, step=step))
             actions.append(a.action_type)
 
-        # The first LIMIT actions should be expert_dropout
-        assert all(t == "expert_dropout" for t in actions[:_CASCADE_REPEAT_LIMIT])
-        # At some point after LIMIT repeats, downgrade should happen
-        assert "expert_dropout" not in actions[_CASCADE_REPEAT_LIMIT:] or \
-               any(t != "expert_dropout" for t in actions[_CASCADE_REPEAT_LIMIT:]), \
-               "Cascade guard never fired after repeated expert_dropout"
+        # The first LIMIT actions should be router_noise
+        assert all(t == "router_noise" for t in actions[:_CASCADE_REPEAT_LIMIT])
+        # After LIMIT repeats, downgrade should happen
+        assert any(t != "router_noise" for t in actions[_CASCADE_REPEAT_LIMIT:]), \
+               "Cascade guard never fired for non-critical risk after _CASCADE_REPEAT_LIMIT"
+
+        # --- Critical-risk cascade (risk=0.9, expert_dropout tier) ---
+        # The guard must NOT fire within _CASCADE_REPEAT_LIMIT steps —
+        # a genuine collapse needs the strongest action to keep firing.
+        # It should fire after _CASCADE_CRITICAL_REPEAT_LIMIT steps.
+        policy2 = _policy()
+        actions2 = []
+        for step in range(_CASCADE_CRITICAL_REPEAT_LIMIT + 2):
+            a = policy2.select_action(_state(0.9, layer_id=0, step=step))
+            actions2.append(a.action_type)
+
+        # First _CASCADE_REPEAT_LIMIT steps must NOT be suppressed
+        assert all(t == "expert_dropout" for t in actions2[:_CASCADE_REPEAT_LIMIT]), \
+               "Cascade guard fired too early for critical-risk expert_dropout"
+        # Eventually (by _CASCADE_CRITICAL_REPEAT_LIMIT + 2) it must fire
+        assert any(t != "expert_dropout" for t in actions2[_CASCADE_CRITICAL_REPEAT_LIMIT:]), \
+               "Cascade guard never fired after _CASCADE_CRITICAL_REPEAT_LIMIT for expert_dropout"
 
     def test_noop_never_downgraded_by_cascade(self) -> None:
         policy = _policy()
