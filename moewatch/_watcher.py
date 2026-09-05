@@ -564,6 +564,16 @@ class MoEWatch:
 
         self._global_step = global_step
 
+        # SafetyGuard.update_baseline_loss() must actually be called for
+        # the loss-spike guard to do anything: SafetyGuard is constructed
+        # with `_loss_baseline = None`, and `_check_loss_guard` returns
+        # immediately (check passes trivially) whenever the baseline is
+        # None. Previously nothing in the production code path ever
+        # called `update_baseline_loss()` — only its own module
+        # docstring mentioned it — so the loss guard was permanently a
+        # no-op regardless of how much training loss spiked.
+        self._update_loss_baseline(current_loss)
+
         # Best-effort: propagate to hooks so events captured during the
         # *next* forward pass carry the correct step number even if the
         # caller never calls pre_step(). Events captured during *this*
@@ -1026,6 +1036,60 @@ class MoEWatch:
     # ------------------------------------------------------------------
     # Intervention helpers
     # ------------------------------------------------------------------
+
+    def _update_loss_baseline(self, current_loss: float) -> None:
+        """Establish or slowly adapt SafetyGuard's loss-spike baseline.
+
+        Parameters
+        ----------
+        current_loss : float
+            Training loss observed at the current step.
+
+        Returns
+        -------
+        None
+
+        Notes
+        -----
+        No-op if interventions are disabled (no ``SafetyGuard`` exists to
+        update) or if ``current_loss`` is non-finite.
+
+        On the very first observation (baseline unset), the baseline is
+        set outright to ``current_loss``. On every subsequent step, the
+        baseline is nudged toward ``current_loss`` via a slow exponential
+        moving average (``alpha=0.02``) — but ONLY when ``current_loss``
+        does not itself exceed the current spike threshold
+        (``baseline * config.loss_guard_threshold``). This lets the
+        baseline track a legitimately improving loss curve over the
+        course of training without ever being pulled upward by a
+        transient spike — if a spike were folded into the baseline
+        immediately, it would become "the new normal" and the guard could
+        never detect it.
+        """
+        if self.intervention_engine is None:
+            return
+
+        if current_loss != current_loss or current_loss in (
+            float("inf"),
+            float("-inf"),
+        ):
+            return
+
+        guard = self.intervention_engine.safety_guard
+        existing = guard.get_baseline_loss()
+
+        if existing is None:
+            guard.update_baseline_loss(current_loss)
+            return
+
+        threshold = existing * self.config.loss_guard_threshold
+        if current_loss <= threshold:
+            _LOSS_BASELINE_EMA_ALPHA = 0.02
+            new_baseline = (
+                (1.0 - _LOSS_BASELINE_EMA_ALPHA) * existing
+                + _LOSS_BASELINE_EMA_ALPHA * current_loss
+            )
+            guard.update_baseline_loss(new_baseline)
 
     def _init_intervention_system(self) -> None:
         """Instantiate the intervention engine and policy.

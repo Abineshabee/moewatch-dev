@@ -437,27 +437,66 @@ class EntropyAnalyzer:
         current_entropy: float = 0.0
         normalized_entropy: float = 0.0
 
+        # Two independent signals are considered:
+        #   1. expert_util  — token-count utilization (selected_experts).
+        #   2. raw_logits   — softmax of the raw router logits.
+        #
+        # expert_util is cheap and normally reliable, but it degenerates
+        # to an exactly-uniform distribution whenever top_k == n_experts
+        # (dense/full routing, where every expert is "selected" for every
+        # token regardless of how skewed the underlying probabilities
+        # are). In that configuration expert_util reports
+        # normalized_entropy == 1.0 forever, completely hiding a genuine
+        # routing collapse that the raw logits would clearly show. Relying
+        # on expert_util alone (the previous behaviour) meant MoEWatch
+        # could silently miss collapses in any dense-routing model.
+        #
+        # To fix this without discarding expert_util's value in the
+        # normal (sparse top-k) case, both signals are computed whenever
+        # available and the *lower* (more collapsed) normalized entropy
+        # is used. A falsely-uniform utilization signal can never mask a
+        # real collapse that the logits reveal, while in the common case
+        # where both signals agree, behaviour is unchanged.
+        util_normalized_entropy: Optional[float] = None
+        util_current_entropy: float = 0.0
+        logits_normalized_entropy: Optional[float] = None
+        logits_current_entropy: float = 0.0
+
         if expert_util is not None and hasattr(expert_util, "cpu"):
             # Use pre-computed expert utilization (most efficient path).
             probs_np = expert_util.cpu().float().numpy().astype(np.float64)
             if probs_np.ndim > 1:
                 probs_np = probs_np.mean(axis=0)
-            current_entropy = compute_entropy(probs_np)
+            util_current_entropy = compute_entropy(probs_np)
             if n_experts >= 2:
-                normalized_entropy = compute_entropy_norm(probs_np, n_experts)
+                util_normalized_entropy = compute_entropy_norm(probs_np, n_experts)
 
-        elif (
+        if (
             raw_logits_window is not None
             and hasattr(raw_logits_window, "shape")
             and raw_logits_window.numel() > 0
+            and raw_logits_window.ndim >= 2
+            and raw_logits_window.shape[-1] > 1
         ):
-            # Fall back to logits window.
             # Take the mean distribution across the entire window.
-            if raw_logits_window.ndim >= 2 and raw_logits_window.shape[-1] > 1:
-                probs_np = _softmax_to_probs(raw_logits_window)
-                current_entropy = compute_entropy(probs_np)
-                if n_experts >= 2:
-                    normalized_entropy = compute_entropy_norm(probs_np, n_experts)
+            probs_np = _softmax_to_probs(raw_logits_window)
+            logits_current_entropy = compute_entropy(probs_np)
+            if n_experts >= 2:
+                logits_normalized_entropy = compute_entropy_norm(probs_np, n_experts)
+
+        if util_normalized_entropy is not None and logits_normalized_entropy is not None:
+            if logits_normalized_entropy <= util_normalized_entropy:
+                normalized_entropy = logits_normalized_entropy
+                current_entropy = logits_current_entropy
+            else:
+                normalized_entropy = util_normalized_entropy
+                current_entropy = util_current_entropy
+        elif util_normalized_entropy is not None:
+            normalized_entropy = util_normalized_entropy
+            current_entropy = util_current_entropy
+        elif logits_normalized_entropy is not None:
+            normalized_entropy = logits_normalized_entropy
+            current_entropy = logits_current_entropy
 
         # ------------------------------------------------------------------
         # Update CUSUM and entropy history
@@ -471,12 +510,37 @@ class EntropyAnalyzer:
             if len(history) > _TREND_LONG_WINDOW * 4:
                 self._entropy_history[layer_name] = history[-(_TREND_LONG_WINDOW * 2):]
 
-            # CUSUM expects values that are "too low" = signal of collapse.
-            # We feed the negative entropy shift so that a *drop* in entropy
-            # triggers the positive CUSUM direction.
+            # CUSUM must only ever fire on a *drop* in entropy (routing
+            # collapse). Feeding the raw normalised entropy straight into
+            # CUSUMDetector.update() is wrong: entropy is bounded in
+            # [0, 1], so healthy/high entropy (~1.0) steadily accumulates
+            # in the detector's positive direction — (value - drift) is
+            # positive whenever entropy exceeds the drift allowance — and
+            # eventually crosses the threshold even though routing is
+            # perfectly healthy. That produced spurious drift alerts
+            # during entirely healthy phases.
+            #
+            # Instead we feed the "shortfall" from maximum entropy
+            # (1.0 - normalized_entropy). This is ~0 whenever routing is
+            # healthy (entropy near 1.0) and only grows large when entropy
+            # is genuinely low, so only real collapses accumulate past the
+            # threshold. Because the shortfall is always >= 0, the
+            # detector's negative direction can never fire either, so
+            # `update()` effectively only reports genuine entropy drops.
+            entropy_shortfall = max(0.0, 1.0 - normalized_entropy)
             drift_detected = self._cusum_detectors[layer_name].update(
-                normalized_entropy
+                entropy_shortfall
             )
+
+            if drift_detected:
+                # Reset the cumulative sum immediately after a detection.
+                # Without this, the sum keeps climbing (or decays very
+                # slowly) once past threshold, so `drift_detected` keeps
+                # reporting True for many steps after entropy has already
+                # recovered — alerts never "clear" during the recovery
+                # phase. Resetting lets the detector start fresh and only
+                # fire again if entropy collapses again.
+                self._cusum_detectors[layer_name].reset()
 
             self._latest_steps[layer_name] = step
 

@@ -79,6 +79,21 @@ warnings.filterwarnings(
 SEP  = "─" * 68
 SEP2 = "═" * 68
 
+# Severity ordering used to pick the *most severe* alert to display when
+# several fire on the same step (e.g. an entropy WARNING alongside a
+# gradient-starvation CRITICAL). Previously the walkthrough displayed
+# whichever alert happened to be first in report.alerts — an artifact of
+# internal generation order (entropy, then collapse, then gradient, then
+# risk), not severity — so a step could genuinely have a CRITICAL alert
+# while the table showed "WARNING: entropy_drift".
+_LEVEL_SEVERITY = {
+    AlertLevel.DEBUG: 0,
+    AlertLevel.INFO: 1,
+    AlertLevel.WARNING: 2,
+    AlertLevel.ERROR: 3,
+    AlertLevel.CRITICAL: 4,
+}
+
 def _banner(title: str) -> None:
     print(f"\n{SEP2}")
     print(f"  {title}")
@@ -110,26 +125,54 @@ class DemoMoE(nn.Module):
 
     def __init__(self, d_model: int = 32):
         super().__init__()
-        self.gate    = nn.Linear(d_model, self.N_EXPERTS, bias=False)
+        # bias=True: the collapse is injected via this bias (see
+        # `_apply_collapse_bias` below). It must be a real part of the
+        # gate module's own output — not something added to a copy of
+        # the logits afterwards — because MoEWatch's router hook is a
+        # `register_forward_hook` on `self.gate` itself. A hook only ever
+        # sees what the hooked module actually returned; a bias applied
+        # to a *cloned* tensor downstream of the call is invisible to it.
+        # (An earlier version of this demo did exactly that — added the
+        # bias to a `.clone()` of `self.gate(xf)` — which meant MoEWatch
+        # was permanently monitoring the *pre-collapse* logits and could
+        # never observe the injected collapse at all, regardless of any
+        # analyzer-side fix.)
+        self.gate    = nn.Linear(d_model, self.N_EXPERTS, bias=True)
         self.experts = nn.ModuleList([
             nn.Linear(d_model, d_model, bias=False)
             for _ in range(self.N_EXPERTS)
         ])
         # Small-std init → softmax ≈ uniform → normalised entropy ≈ 1.0 at step 0.
         nn.init.normal_(self.gate.weight, std=0.01)
+        nn.init.zeros_(self.gate.bias)
 
         # Set this to a large positive value to inject a routing collapse
         # onto expert 0 without touching model weights.
         self.collapse_bias: float = 0.0
 
+    def _apply_collapse_bias(self) -> None:
+        """Write `collapse_bias` into the gate's own bias parameter.
+
+        Done in-place, under `no_grad`, at the start of every forward
+        call — this deterministically overrides whatever the optimizer
+        did to `gate.bias` on the previous step, so the demo's collapse
+        schedule stays exact regardless of training dynamics. Because
+        this mutates the bias that `self.gate` itself will use in this
+        forward pass, the resulting logits — and therefore what
+        MoEWatch's hook on `self.gate` observes — genuinely reflect the
+        collapse.
+        """
+        with torch.no_grad():
+            self.gate.bias.zero_()
+            if self.collapse_bias != 0.0:
+                self.gate.bias[0] = self.collapse_bias
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, S, D = x.shape
         xf      = x.reshape(B * S, D)
 
+        self._apply_collapse_bias()
         logits = self.gate(xf)
-        if self.collapse_bias != 0.0:
-            logits = logits.clone()
-            logits[:, 0] = logits[:, 0] + self.collapse_bias
 
         weights, indices = torch.topk(
             F.softmax(logits, dim=-1), self.TOP_K, dim=-1
@@ -149,10 +192,8 @@ class DemoMoE(nn.Module):
         """Normalised routing entropy [0, 1] for the current batch."""
         with torch.no_grad():
             xf = x.reshape(-1, x.shape[-1])
+            self._apply_collapse_bias()
             logits = self.gate(xf)
-            if self.collapse_bias != 0.0:
-                logits = logits.clone()
-                logits[:, 0] = logits[:, 0] + self.collapse_bias
             p = F.softmax(logits, dim=-1).clamp(min=1e-9)
             H = -(p * p.log()).sum(dim=-1).mean()
             return (H / math.log(self.N_EXPERTS)).item()
@@ -202,13 +243,11 @@ def section_2_configure() -> WatchConfig:
 
   Note on the fused risk score:
     The risk score combines gradient starvation (Tier 1, weight 0.6) and
-    entropy drift (Tier 2, weight 0.3). The Tier-1 threshold (cold_threshold)
-    is calibrated for production gradient norms; in this small demo model the
-    gradient norms (~0.001) are below cold_threshold=1.0, so Tier 1 reads
-    ~0.6 even when routing is healthy. The entropy and alert signals are not
-    affected by this calibration — they reflect actual routing behaviour.
-    For a production run, set cold_threshold to match your model's typical
-    gradient norm magnitude.
+    entropy drift (Tier 2, weight 0.3). Tier 1's cold_threshold is applied
+    RELATIVE to the layer's own median expert gradient norm whenever
+    there are peer experts to compare against, so it self-calibrates to
+    whatever gradient-norm scale a model actually produces — no manual
+    tuning needed even for this tiny demo model's ~0.001–0.1 norms.
 
   Other settings (shortened proportionally for a 45-step demo):
     cold_steps_limit      =  8  (default  50  — steps before DEAD alert)
@@ -302,7 +341,23 @@ def section_4_5_6_training_loop(model: DemoMoE, watch: MoEWatch) -> None:
         )
 
         # Forward + backward
-        x    = torch.randn(8, 16, 32)
+        #
+        # requires_grad=True is necessary here, not cosmetic: DemoMoE's
+        # forward pass uses boolean-mask scatter-add (`out[mask] += ...`)
+        # to combine expert outputs. When the input to a module has no
+        # gradient tracking, PyTorch's register_full_backward_hook (used
+        # internally by MoEWatch's gradient-starvation hook) falls back to
+        # a less precise firing mechanism — the hook fires before the
+        # experts' own parameter gradients have actually been accumulated,
+        # so every expert reads grad=None on every step. MoEWatch then
+        # sees "zero gradient norm" for every expert forever, which the
+        # gradient-starvation analyzer correctly (but misleadingly)
+        # reports as total starvation — even during the healthy phase.
+        # In real training this rarely matters, since hidden states are
+        # downstream of learnable embeddings and therefore already
+        # require grad; this demo constructs `x` directly, so it must be
+        # marked explicitly.
+        x    = torch.randn(8, 16, 32, requires_grad=True)
         ent  = model.norm_entropy(x)
         out  = model(x)
         loss = out.pow(2).mean()
@@ -322,7 +377,7 @@ def section_4_5_6_training_loop(model: DemoMoE, watch: MoEWatch) -> None:
             atype = report.active_interventions[0].action_type
             note  = f"INTERVENED → {atype}"
         elif n_alert > 0:
-            top  = report.alerts[0]
+            top  = max(report.alerts, key=lambda a: _LEVEL_SEVERITY.get(a.level, 0))
             note = f"{top.level.value.upper()}: {top.signal_type}"
 
         # Mark threshold crossings explicitly
@@ -364,6 +419,30 @@ def section_4_5_6_training_loop(model: DemoMoE, watch: MoEWatch) -> None:
     print(f"    Phase A (healthy,   steps  1–15) : {len(phase_a):>4} alerts")
     print(f"    Phase B (collapse,  steps 16–35) : {len(phase_b):>4} alerts")
     print(f"    Phase C (restored,  steps 36–45) : {len(phase_c):>4} alerts")
+
+    phase_c_dead   = [a for a in phase_c if a.signal_type == "expert_dead"]
+    phase_c_other  = [a for a in phase_c if a.signal_type != "expert_dead"]
+    print(f"""
+  Phase C still shows alerts — this is expected, not a bug:
+
+    entropy_drift / gradient_starvation (Tier 1) — these DO auto-clear as
+    routing genuinely recovers. Phase C count for these : {len(phase_c_other)}
+    (decaying toward 0 as the rolling stats window fills with healthy
+    steps and CUSUM's cumulative sum, which resets on every detection,
+    stops re-accumulating).
+
+    expert_dead — DEAD is a ONE-WAY state (see collapse.py): once an
+    expert has been below the cold threshold for `cold_steps_limit`
+    consecutive steps it is promoted to DEAD and MoEWatch keeps
+    reporting it every step, even after routing recovers, until you
+    explicitly call watch.collapse_detector.reset(). This mirrors real
+    MoE deployments, where a genuinely dead expert rarely "heals itself"
+    just because routing became balanced again — silently un-flagging it
+    would hide a condition an operator should confirm and act on.
+    Phase C count for expert_dead : {len(phase_c_dead)} (same {int(phase_c_dead[0].metrics.get('num_dead_experts', 0)) if phase_c_dead else 0}-expert
+    count throughout — no *new* experts are dying, the alert is just
+    persisting by design).
+""")
 
     first_crit = next((a for a in crit), None)
     if first_crit:
@@ -440,13 +519,12 @@ def section_7_summary(watch: MoEWatch) -> None:
     print("""
   watch.get_risk_summary() gives the latest fused risk score per layer.
 
-  Note: in this small demo model the risk score sits in the HIGH band
-  throughout because the Tier-1 (gradient starvation) component is
-  calibrated for production-scale gradient norms (cold_threshold=1.0
-  default, your model's norms ≈ 0.001). In a real training run the
-  risk score correctly spans the full 0.0–1.0 range. The entropy and
-  alert signals demonstrated above are calibration-independent and
-  correctly tracked all three phases.
+  Note: gradient-starvation (Tier 1) now uses a threshold RELATIVE to
+  the layer's own median expert gradient norm whenever there are peer
+  experts to compare against, rather than a fixed absolute value
+  calibrated for production-scale models. That's what lets this tiny
+  demo model (gradient norms ≈ 0.001–0.1) correctly read LOW risk once
+  routing recovers, without any manual cold_threshold tuning.
 """)
     summary = watch.get_risk_summary()
     print(f"  {'layer':<20}  {'risk score':>12}  note")

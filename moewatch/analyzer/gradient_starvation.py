@@ -38,6 +38,15 @@
 #     consecutive_cold_steps >= config.cold_steps_limit
 #   starvation_onset_step recorded at first crossing of cold_threshold
 #
+#   cold_threshold is RELATIVE whenever a layer has >= 2 experts with
+#   sufficient samples: threshold = _RELATIVE_COLD_FRACTION * median(norm
+#   across layer-mates). Using the median (not the mean) keeps a single
+#   outlier expert from skewing the reference for everyone else. This
+#   self-calibrates to whatever gradient-norm scale the model actually
+#   produces. config.cold_threshold (an absolute value) is used only as
+#   a fallback when there's no peer group to compare against (e.g. a
+#   single-expert layer) — see `_compute_layer_mean_norm`.
+#
 # Dependencies
 # ------------
 #   moewatch.collector.stat_collector — StatCollector
@@ -77,6 +86,13 @@ _MIN_SAMPLES_FOR_DETECTION: int = 3
 # Maximum gradient history retained per expert in the internal bookkeeping
 # dicts (onset step tracking only — actual norm history lives in StatCollector).
 _MAX_ONSET_HISTORY: int = 1000
+
+# Fraction of a layer's mean expert gradient norm below which an expert is
+# considered "cold" relative to its peers. Used instead of the absolute
+# config.cold_threshold whenever at least two experts in the same layer
+# have enough samples to compute a meaningful peer average — see
+# `_compute_layer_mean_norm` / the `layer_mean_norm` fix in `_analyze_expert`.
+_RELATIVE_COLD_FRACTION: float = 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -225,11 +241,25 @@ class GradientStarvationAnalyzer:
                 self._starvation_counters[layer_name] = {}
                 self._onset_steps[layer_name] = {}
 
+            # Compute a peer reference norm for this layer once, so each
+            # expert can be judged relative to its layer-mates rather than
+            # only against a single hardcoded absolute value (see
+            # `_compute_layer_mean_norm` docstring for rationale).
+            layer_mean_norm, n_valid_experts = self._compute_layer_mean_norm(
+                expert_stats_map
+            )
+
             # Process experts in deterministic order.
             for expert_id in sorted(expert_stats_map.keys()):
                 grad_stats = expert_stats_map[expert_id]
                 try:
-                    report = self._analyze_expert(layer_name, expert_id, grad_stats)
+                    report = self._analyze_expert(
+                        layer_name,
+                        expert_id,
+                        grad_stats,
+                        layer_mean_norm=layer_mean_norm,
+                        n_valid_experts=n_valid_experts,
+                    )
                     layer_reports.append(report)
                 except Exception as exc:  # pylint: disable=broad-except
                     logger.warning(
@@ -252,6 +282,74 @@ class GradientStarvationAnalyzer:
         return reports
 
     # ------------------------------------------------------------------
+    # Internal: layer-level peer reference norm
+    # ------------------------------------------------------------------
+
+    def _compute_layer_mean_norm(
+        self,
+        expert_stats_map: Dict[int, object],
+    ) -> "tuple[float, int]":
+        """Compute a robust peer-reference gradient norm for a layer.
+
+        Used to derive a *relative* cold threshold (see
+        ``_RELATIVE_COLD_FRACTION``) instead of relying solely on the
+        absolute ``config.cold_threshold``. The absolute default is
+        calibrated for typical production-scale gradient norms
+        (e.g. 0.1–10.0); for a small model whose gradient norms sit at
+        0.001–0.01, the absolute threshold is always far above every
+        expert's norm, so every expert is permanently misclassified as
+        starving. Comparing each expert against its layer-mates
+        self-calibrates to whatever scale the model actually produces,
+        regardless of absolute magnitude.
+
+        The **median** (not the mean) of the experts' norms is used as
+        the reference. A plain mean is not robust to a single outlier:
+        if one expert dominated routing during a prior collapse and
+        still carries a disproportionately larger gradient norm even
+        after routing recovers, averaging it in with the rest inflates
+        the reference and can permanently misclassify every *other*,
+        genuinely healthy expert as "cold relative to the outlier" —
+        exactly the kind of stuck, never-clearing alert this fix is
+        meant to prevent. The median is unaffected by a single such
+        outlier, so recovery is judged against what most experts are
+        actually doing.
+
+        Only experts with at least ``_MIN_SAMPLES_FOR_DETECTION`` finite
+        samples contribute, matching the sample-sufficiency gate used in
+        ``_analyze_expert``.
+
+        Parameters
+        ----------
+        expert_stats_map : dict[int, GradientStats]
+            All experts' gradient stats for one layer, as returned by
+            ``StatCollector.get_all_stats()``.
+
+        Returns
+        -------
+        tuple[float, int]
+            ``(layer_reference_norm, n_valid_experts)``. ``n_valid_experts``
+            is the number of experts that contributed. Callers should
+            only trust the relative threshold when this is >= 2 (a
+            single expert has no peers to be judged against).
+        """
+        means: List[float] = []
+        for grad_stats in expert_stats_map.values():
+            norm_history = list(
+                getattr(grad_stats, "gradient_norm_history", []) or []
+            )
+            if len(norm_history) < _MIN_SAMPLES_FOR_DETECTION:
+                continue
+            arr = np.array(norm_history, dtype=np.float64)
+            finite = arr[np.isfinite(arr)]
+            if len(finite) == 0:
+                continue
+            means.append(float(finite.mean()))
+
+        if not means:
+            return 0.0, 0
+        return float(np.median(means)), len(means)
+
+    # ------------------------------------------------------------------
     # Internal: single-expert analysis
     # ------------------------------------------------------------------
 
@@ -260,6 +358,8 @@ class GradientStarvationAnalyzer:
         layer_name: str,
         expert_id: int,
         grad_stats: object,
+        layer_mean_norm: float = 0.0,
+        n_valid_experts: int = 0,
     ) -> GradientStarvationReport:
         """Compute starvation report for one expert.
 
@@ -271,6 +371,15 @@ class GradientStarvationAnalyzer:
             Expert index.
         grad_stats : GradientStats
             Statistics snapshot from StatCollector.
+        layer_mean_norm : float, optional
+            Mean gradient norm across this expert's layer-mates (see
+            ``_compute_layer_mean_norm``). Used as the reference for a
+            relative cold threshold when ``n_valid_experts >= 2``.
+        n_valid_experts : int, optional
+            Number of experts that contributed to ``layer_mean_norm``.
+            Below 2, there is no meaningful peer group to compare
+            against, so the absolute ``config.cold_threshold`` is used
+            instead.
 
         Returns
         -------
@@ -338,7 +447,20 @@ class GradientStarvationAnalyzer:
         # ------------------------------------------------------------------
         # Starvation score: continuous metric
         # ------------------------------------------------------------------
-        cold_threshold = max(self.config.cold_threshold, 1e-9)
+        # Prefer a threshold relative to this expert's layer-mates when at
+        # least one other expert is available for comparison — this is
+        # what actually self-calibrates to the model's real gradient
+        # scale (see `_compute_layer_mean_norm`). Fall back to the
+        # absolute config.cold_threshold only when there's no peer group
+        # to compare against (e.g. a layer with a single expert), since a
+        # relative threshold is meaningless without peers.
+        if n_valid_experts >= 2 and layer_mean_norm > 1e-12:
+            cold_threshold = max(
+                layer_mean_norm * _RELATIVE_COLD_FRACTION, 1e-9
+            )
+        else:
+            cold_threshold = max(self.config.cold_threshold, 1e-9)
+
         starvation_score = float(
             np.clip(1.0 - norm_mean / cold_threshold, 0.0, 1.0)
         )

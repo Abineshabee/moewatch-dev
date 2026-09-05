@@ -200,6 +200,19 @@ class SafetyGuard:
 
         self._loss_baseline = float(loss)
 
+    def get_baseline_loss(self) -> "float | None":
+        """Return the currently recorded baseline loss.
+
+        Returns
+        -------
+        float or None
+            The value most recently set via :meth:`update_baseline_loss`,
+            or ``None`` if it has never been called for this guard
+            instance (in which case :meth:`check`'s loss-guard sub-check
+            passes trivially — see :meth:`_check_loss_guard`).
+        """
+        return self._loss_baseline
+
     # ------------------------------------------------------------------
     # Main check
     # ------------------------------------------------------------------
