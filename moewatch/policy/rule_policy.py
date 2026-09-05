@@ -56,7 +56,7 @@ from __future__ import annotations
 import json
 import logging
 from collections import deque
-from typing import TYPE_CHECKING, Deque, Dict
+from typing import TYPE_CHECKING, Deque, Dict, Tuple
 
 from moewatch.intervention.actions import (
     AuxLossAction,
@@ -91,8 +91,10 @@ _RISK_ROUTERNOISE_MAX = 0.8
 _ACTION_ORDER = ("noop", "aux_loss", "router_noise", "expert_dropout")
 
 #: How many of a layer's most recent actions are retained for oscillation
-#: and cascade detection.
-_HISTORY_LEN = 5
+#: and cascade detection. Must be strictly greater than
+#: _CASCADE_CRITICAL_REPEAT_LIMIT so that the ring buffer can accumulate
+#: enough entries for the cascade guard to fire at the critical limit.
+_HISTORY_LEN = 8
 
 #: If the threshold-selected action equals the immediately preceding
 #: action for this layer more than this many times in the retained
@@ -106,8 +108,9 @@ _CASCADE_REPEAT_LIMIT = 3
 #: intervention exactly when most needed.  The guard still fires when
 #: the action has filled the entire retained history window (_HISTORY_LEN)
 #: without any sign of improvement — i.e. every single tracked step chose
-#: the same action.  Must be <= _HISTORY_LEN.
-_CASCADE_CRITICAL_REPEAT_LIMIT = _HISTORY_LEN  # == 5
+#: the same action.  Must be < _HISTORY_LEN so the ring buffer can
+#: accumulate enough entries for the count to reach the limit.
+_CASCADE_CRITICAL_REPEAT_LIMIT = 5  # > _CASCADE_REPEAT_LIMIT; < _HISTORY_LEN is no longer required
 
 
 class RulePolicy(PolicyBase):
@@ -153,12 +156,25 @@ class RulePolicy(PolicyBase):
     def __init__(self, config: "WatchConfig") -> None:
         self.config: "WatchConfig" = config
 
-        # layer_name -> recent action_type history (most recent last).
+        # layer_name -> recent *final* action_type history (most recent last).
+        # Used only for the oscillation guard (requires a sliding window).
         self._recent_actions: Dict[str, Deque[str]] = {}
 
         # layer_name -> most recently *selected* action_type (prior to any
         # downgrade), used purely for diagnostics/logging.
         self._action_sequence: Dict[str, str] = {}
+
+        # layer_name -> (candidate_action_type, consecutive_count).
+        # Tracks how many consecutive steps the same CANDIDATE action has been
+        # selected by the threshold mapping, independent of ring-buffer size.
+        #
+        # Reset semantics (critical to correctness):
+        #   - Reset when candidate CHANGES (different risk tier) → always
+        #   - Reset when cascade fires on CRITICAL risk → lets expert_dropout
+        #     resume after a single injected downgrade step
+        #   - NEVER reset for non-critical risk cascade → keeps firing
+        #     continuously while risk stays in same tier
+        self._candidate_consecutive: Dict[str, tuple] = {}
 
     # ------------------------------------------------------------------
     # PolicyBase interface
@@ -222,9 +238,34 @@ class RulePolicy(PolicyBase):
         )
 
         candidate = self._risk_to_action_type(state.risk_score)
+        is_critical_risk = state.risk_score >= _RISK_ROUTERNOISE_MAX
+
+        # Update candidate consecutive counter.
+        # Always increment when candidate matches previous candidate.
+        # Reset when candidate changes (different risk tier).
+        prev_cand, prev_count = self._candidate_consecutive.get(layer_name, ("", 0))
+        if candidate == prev_cand:
+            consecutive_count = prev_count + 1
+        else:
+            consecutive_count = 1
+
         final_action_type = self._apply_guards(
-            layer_name, history, candidate, state.risk_score
+            layer_name, history, candidate, state.risk_score, consecutive_count
         )
+
+        # Update counter based on reset semantics:
+        #   - Non-critical: NEVER reset after guard fires → cascade keeps firing
+        #     continuously while risk stays at same tier (count keeps growing)
+        #   - Critical: reset after guard fires → expert_dropout resumes with
+        #     a fresh count after each injected downgrade step
+        guard_fired = (final_action_type != candidate)
+        if guard_fired and is_critical_risk:
+            # Critical: reset so expert_dropout gets fresh runway next step
+            self._candidate_consecutive[layer_name] = (candidate, 0)
+        else:
+            # Non-critical (or no guard): store accumulated count so cascade
+            # keeps firing every step while candidate remains unchanged
+            self._candidate_consecutive[layer_name] = (candidate, consecutive_count)
 
         self._action_sequence[layer_name] = candidate
         history.append(final_action_type)
@@ -312,6 +353,10 @@ class RulePolicy(PolicyBase):
                 layer: list(hist) for layer, hist in self._recent_actions.items()
             },
             "action_sequence": dict(self._action_sequence),
+            "candidate_consecutive": {
+                layer: list(pair)
+                for layer, pair in self._candidate_consecutive.items()
+            },
         }
 
         try:
@@ -364,6 +409,10 @@ class RulePolicy(PolicyBase):
             for layer, actions in recent_actions.items()
         }
         self._action_sequence = dict(payload.get("action_sequence", {}))
+        self._candidate_consecutive = {
+            layer: tuple(pair)
+            for layer, pair in payload.get("candidate_consecutive", {}).items()
+        }
 
         logger.info(
             "[MoEWatch] RulePolicy: loaded action history for %d layer(s) "
@@ -401,6 +450,7 @@ class RulePolicy(PolicyBase):
         history: Deque[str],
         candidate: str,
         risk_score: float = 0.0,
+        consecutive_count: int = 0,
     ) -> str:
         """Apply oscillation and cascade guards, returning the final action type.
 
@@ -444,59 +494,46 @@ class RulePolicy(PolicyBase):
         if candidate == "noop":
             return candidate
 
-        # Cascade guard: same strong action repeating too often.
-        #
-        # The guard's purpose is to prevent repeated identical actions when
-        # they are not working — e.g. aux_loss firing every step but risk
-        # never drops.  However, when risk is genuinely and persistently
-        # above the expert_dropout threshold (>= _RISK_ROUTERNOISE_MAX),
-        # the model is in active collapse and the repeated action IS correct:
-        # suppressing it permanently would disable intervention exactly when
-        # it is most needed, which is backwards.
-        #
-        # When risk is genuinely critical (>= _RISK_ROUTERNOISE_MAX = 0.8),
-        # use a much higher repeat limit before suppressing — a real collapse
-        # legitimately needs the same strong action many times.  The guard
-        # still fires eventually (after _CASCADE_CRITICAL_REPEAT_LIMIT steps)
-        # in case the action is truly having no effect.
-        # Below 0.8 (borderline risk), use the normal limit so that a
-        # repeatedly-ineffective weaker action gets downgraded promptly.
+        # ------------------------------------------------------------------
+        # Cascade guard
+        # ------------------------------------------------------------------
         is_critical_risk = risk_score >= _RISK_ROUTERNOISE_MAX
         repeat_limit = (
             _CASCADE_CRITICAL_REPEAT_LIMIT if is_critical_risk else _CASCADE_REPEAT_LIMIT
         )
-        # Use > for critical risk so the guard never fires when the window
-        # is exactly full of the same critical action (all 5 entries ==
-        # expert_dropout is correct during active collapse, not a cascade).
-        # For non-critical risk, keep >= so the guard fires after exactly
-        # _CASCADE_REPEAT_LIMIT consecutive same-action steps.
-        count = list(history).count(candidate)
-        if is_critical_risk:
-            if count > repeat_limit:
-                return self._downgrade(candidate)
-        else:
-            if count >= repeat_limit:
-                return self._downgrade(candidate)
 
-        # Oscillation guard: detect strict A,B,A,B alternation across at
-        # least 4 entries in the history window.
+        # Both limits use > (strict greater-than) so the first `repeat_limit`
+        # steps always pass through undisturbed:
+        #   count=1,2,...,repeat_limit → all pass (count > limit is False)
+        #   count=repeat_limit+1 → fires (count > limit is True)
+        if consecutive_count > repeat_limit:
+            return self._downgrade(candidate)
+
+        # ------------------------------------------------------------------
+        # Oscillation guard
+        # ------------------------------------------------------------------
+        # Detect strict [A, B, A, B] alternation in the history window.
+        # The pattern is: h[-4]=A, h[-3]=B, h[-2]=A, h[-1]=B
+        # and the candidate wants to select A again — fire the guard.
         #
-        # BUG FIX: The previous guard fired on any pattern where
-        # history[-1] == candidate and history[-2] != candidate — e.g.
-        # [noop, noop, aux_loss] + aux_loss would fire because history[-1]
-        # was 'aux_loss' and history[-2] was 'noop'. This is NOT oscillation;
-        # it is a normal risk escalation (noop was correct when risk was low,
-        # aux_loss is correct now that risk climbed). True oscillation is
-        # A,B,A,B — a strict two-action alternation across multiple steps.
+        # BUG FIX (oscillation condition): check `a == candidate` (A is the
+        # candidate about to repeat), NOT `b == candidate`. In the pattern
+        # [rn, ed, rn, ed], a=rn and b=ed; the guard fires when candidate
+        # is 'rn' (= a), not 'ed' (= b).
         #
-        # Require at least 4 history entries and check that they form a
-        # strict alternating pair, i.e. the last 4 are [X, Y, X, Y] where
-        # X != Y and Y == candidate (about to repeat the flip).
-        if len(history) >= 4:
+        # BUG FIX (false positives): the old guard checked only 2 history
+        # entries — [noop, aux_loss] + aux_loss looked like oscillation but
+        # was actually normal risk escalation. Requiring 4 entries ([X,Y,X,Y])
+        # ensures a genuine multi-step alternation before firing.
+        #
+        # Skip entirely during critical risk: a cascade-injected downgrade
+        # creates a spurious A,B,A pattern that would falsely suppress the
+        # strongest action exactly when the model needs it most.
+        if not is_critical_risk and len(history) >= 4:
             h = list(history)
             a, b = h[-4], h[-3]
-            # Strict alternation: last 4 entries must be [a, b, a, b]
-            if (a == h[-2] and b == h[-1] and a != b and b == candidate):
+            # Strict alternation: [a, b, a, b] and candidate == a (would extend to [a,b,a,b,a])
+            if a == h[-2] and b == h[-1] and a != b and a == candidate:
                 return self._downgrade(candidate)
 
         return candidate
