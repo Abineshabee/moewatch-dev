@@ -137,6 +137,11 @@ class LayerStats:
     load_imbalance_ratio: float
     raw_logits_window: torch.Tensor
     step: int
+    logits_are_probs: bool = False
+    # logits_are_probs=True  → raw_logits_window holds pre-computed probability
+    # vectors (already softmaxed); the entropy analyzer must NOT apply softmax again.
+    # logits_are_probs=False → raw_logits_window holds raw router logits; softmax
+    # should be applied before computing entropy.
 
 
 # ---------------------------------------------------------------------------
@@ -593,6 +598,24 @@ class StatCollector:
 
         raw_logits_window = self._stack_logits_window(events)
 
+        # Determine whether the stacked window holds pre-computed probabilities
+        # or raw logits.  When every event in the window carries an explicit
+        # routing_probs field (set by RouterForwardHook v0.2+), the window is
+        # built from those unambiguous probability vectors instead of relying on
+        # heuristic detection in _softmax_to_probs.
+        logits_are_probs = all(
+            getattr(e, "routing_probs", None) is not None for e in events
+        )
+        if logits_are_probs:
+            # Rebuild the window from routing_probs to be explicit.
+            first_shape = events[0].routing_probs.shape
+            if all(e.routing_probs.shape == first_shape for e in events):
+                raw_logits_window = torch.stack(
+                    [e.routing_probs for e in events], dim=0
+                )
+            else:
+                raw_logits_window = events[-1].routing_probs.unsqueeze(0)
+
         return LayerStats(
             layer_name=layer_name,
             expert_token_counts=token_counts,
@@ -600,6 +623,7 @@ class StatCollector:
             load_imbalance_ratio=load_imbalance_ratio,
             raw_logits_window=raw_logits_window,
             step=events[-1].global_step,
+            logits_are_probs=logits_are_probs,
         )
 
     # ------------------------------------------------------------------

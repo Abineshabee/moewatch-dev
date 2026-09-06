@@ -121,6 +121,10 @@ class RoutingEvent:
     is_expert_counts: bool = False
     # is_expert_counts=True  → selected_experts is shape [n_experts] per-expert token COUNTS
     # is_expert_counts=False → selected_experts is flat/2-D expert INDEX tensor (legacy format)
+    routing_probs: torch.Tensor = None  # type: ignore[assignment]
+    # routing_probs: pre-computed [n_experts] mean probability vector (already softmaxed).
+    # When set, the entropy analyzer uses this directly instead of applying heuristic
+    # detection on routing_logits — eliminating ambiguity between logits and probabilities.
 
 
 # ---------------------------------------------------------------------------
@@ -306,6 +310,7 @@ class RouterForwardHook:
                     expert_count=int(expert_count),
                     batch_size=int(batch_size),
                     is_expert_counts=True,                  # explicit format tag
+                    routing_probs=mean_probs_cpu,           # unambiguous prob vector
                 )
 
             self.stat_collector.write_routing_event(event)

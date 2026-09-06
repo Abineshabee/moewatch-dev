@@ -782,23 +782,30 @@ def _run_single_forward(
     if isinstance(batch, dict):
         call = lambda: model(**batch)                           # noqa: E731
     elif isinstance(batch, (list, tuple)):
-        # Check how many positional args model.forward requires.
-        # If it can accept all elements of the tuple, pass them all.
-        # Otherwise treat as (input, label, ...) and pass only the first.
+        # Determine the maximum number of positional arguments forward()
+        # can accept, including optional ones and *args.
+        # Counting only REQUIRED parameters is wrong: a model with
+        #   forward(self, input_ids, attention_mask=None)
+        # has n_required=1 but can take 2 positional args — passing only
+        # batch[0] silently drops attention_mask.
         try:
             sig = inspect.signature(model.forward)
-            n_positional = sum(
+            has_var_positional = any(
+                p.kind is inspect.Parameter.VAR_POSITIONAL
+                for p in sig.parameters.values()
+            )
+            n_max_positional = sum(
                 1 for p in sig.parameters.values()
-                if p.default is inspect.Parameter.empty
-                and p.kind in (
+                if p.kind in (
                     inspect.Parameter.POSITIONAL_ONLY,
                     inspect.Parameter.POSITIONAL_OR_KEYWORD,
                 )
             )
         except (ValueError, TypeError):
-            n_positional = 1  # cannot inspect — assume (input, label) convention
+            has_var_positional = False
+            n_max_positional = 1  # cannot inspect — assume single-input convention
 
-        if n_positional >= len(batch):
+        if has_var_positional or n_max_positional >= len(batch):
             call = lambda: model(*batch)                        # noqa: E731
         else:
             call = lambda: model(batch[0])                      # noqa: E731

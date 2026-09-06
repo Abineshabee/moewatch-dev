@@ -181,31 +181,31 @@ def compute_entropy_norm(probs: np.ndarray, n_experts: int) -> float:
     return float(np.clip(raw_entropy / h_max, 0.0, 1.0))
 
 
-def _softmax_to_probs(logits: torch.Tensor) -> np.ndarray:
+def _softmax_to_probs(
+    logits: torch.Tensor,
+    is_probs: bool = False,
+) -> np.ndarray:
     """Convert router logits OR pre-computed probabilities to a mean
     probability distribution over experts.
 
     Accepts tensors of shape ``[..., n_experts]`` (any number of leading
     batch / sequence dimensions).
 
-    The ``router_hook`` stores a compact ``mean_probs`` vector (shape
-    ``[n_experts]``, values already softmaxed and averaged) in the
-    ``routing_logits`` field of :class:`~moewatch.hooks.router_hook.RoutingEvent`
-    to reduce memory usage.  When this function receives such a vector it
-    must NOT apply softmax again — doing so would distort the distribution
-    toward uniformity and produce incorrect (inflated) entropy values.
-
-    Detection rule:  a 1-D tensor whose values are all non-negative and
-    sum to approximately 1.0 is already a probability vector and is
-    returned as-is after averaging.  Any other shape, or a 1-D tensor that
-    does not satisfy the probability-vector criterion, is treated as raw
-    logits and passed through softmax first.
-
     Parameters
     ----------
     logits : torch.Tensor
         Raw router logits **or** a pre-computed mean probability vector
         (as stored by the compact router hook).
+    is_probs : bool, optional
+        When ``True``, the caller guarantees that ``logits`` already holds
+        probability values — softmax is skipped entirely.  This eliminates
+        the ambiguity of the value-based heuristic: any non-negative tensor
+        summing to 1.0 would previously be misidentified as probabilities
+        (e.g. raw logits ``[0.2, 0.3, 0.5]``).  The ``StatCollector`` sets
+        this flag via ``LayerStats.logits_are_probs`` when events carry an
+        explicit ``routing_probs`` field.  Defaults to ``False`` for
+        backward compatibility with legacy events that do not carry the
+        field.
 
     Returns
     -------
@@ -219,24 +219,28 @@ def _softmax_to_probs(logits: torch.Tensor) -> np.ndarray:
 
         t = logits.float()
 
-        # Detect whether the stored tensor is already a probability vector.
-        # The router_hook stores mean_probs (shape [n_experts]) as a compact
-        # representation.  A probability vector satisfies:
-        #   (a) 1-D  (b) all values >= 0  (c) sum ≈ 1.0
-        already_probs = (
-            t.ndim == 1
-            and bool((t >= 0).all())
-            and bool(torch.abs(t.sum() - 1.0) < 1e-3)
-        )
-
-        if already_probs:
-            # Values are already probabilities — return directly.
-            probs = t
+        if is_probs:
+            # Caller guarantees these are already probabilities — skip softmax
+            # and skip the value-based heuristic entirely.
+            probs = t if t.ndim == 1 else t.reshape(-1, t.shape[-1]).mean(dim=0)
         else:
-            # Raw logits: apply softmax, then average over batch/token dims.
-            probs = torch.softmax(t, dim=-1)
-            if probs.ndim > 1:
-                probs = probs.reshape(-1, probs.shape[-1]).mean(dim=0)
+            # Legacy path: apply the value heuristic for backward compatibility
+            # with events that predate the explicit routing_probs field.
+            # A 1-D non-negative tensor summing to ~1 is assumed to be a
+            # pre-computed probability vector (as stored by the hook's compact
+            # representation).  Any other tensor is treated as raw logits.
+            already_probs = (
+                t.ndim == 1
+                and bool((t >= 0).all())
+                and bool(torch.abs(t.sum() - 1.0) < 1e-3)
+            )
+
+            if already_probs:
+                probs = t
+            else:
+                probs = torch.softmax(t, dim=-1)
+                if probs.ndim > 1:
+                    probs = probs.reshape(-1, probs.shape[-1]).mean(dim=0)
 
         return probs.cpu().numpy().astype(np.float64)
 
@@ -506,7 +510,10 @@ class EntropyAnalyzer:
             and raw_logits_window.shape[-1] > 1
         ):
             # Take the mean distribution across the entire window.
-            probs_np = _softmax_to_probs(raw_logits_window)
+            probs_np = _softmax_to_probs(
+                raw_logits_window,
+                is_probs=getattr(layer_stats, "logits_are_probs", False),
+            )
             logits_current_entropy = compute_entropy(probs_np)
             if n_experts >= 2:
                 logits_normalized_entropy = compute_entropy_norm(probs_np, n_experts)
