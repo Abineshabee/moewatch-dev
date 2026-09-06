@@ -588,10 +588,28 @@ class CrossLayerCorrelation:
             v_norm = (v - v.mean()) / v_std
 
             # Full cross-correlation using numpy.
+            #
+            # np.correlate(s, v_norm, mode="full")[k] measures agreement
+            # between s and v_norm when v_norm is shifted LEFT relative to
+            # s (equivalently, v_norm is evaluated at earlier indices than
+            # s) as k increases past the zero-lag index (min_len - 1). That
+            # means when the source leads the victim (the source's feature
+            # appears at an earlier index than the victim's — exactly the
+            # "source causes victim later" case this function exists to
+            # detect), the correlation peak lands at an index BELOW
+            # (min_len - 1), not above it. The original formula
+            # (`lag_idx - (min_len - 1)`) has this backwards: it returns a
+            # NEGATIVE number for a genuine source-leads-victim cascade,
+            # which the positive-lag filter below then silently discards
+            # every time — so propagation_velocity would almost never
+            # report a value for the exact cascades it's meant to
+            # characterise. Flipping the subtraction order corrects the
+            # sign so a source-leads-victim delay of L steps yields
+            # lag_steps == +L (verified against a synthetic single-spike
+            # source/victim pair with a known L-step delay).
             xcorr = np.correlate(s, v_norm, mode="full")
-            # Lag 0 is at index (min_len - 1).
             lag_idx = int(np.argmax(xcorr))
-            lag_steps = lag_idx - (min_len - 1)
+            lag_steps = (min_len - 1) - lag_idx
 
             # Only count positive lags (source precedes victim).
             if lag_steps > 0:

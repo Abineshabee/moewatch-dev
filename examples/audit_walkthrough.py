@@ -96,8 +96,10 @@ def _row(label: str, value: object, width: int = 26) -> None:
 #  CheckpointMoE: 4 experts, top_k=2, standard sparse routing.
 #
 #  Collapse is simulated by adding a large positive bias to expert 0's gate
-#  output logit. With bias=+4, expert 0 receives ~95% of all tokens regardless
-#  of the input, giving normalised entropy ≈ 0.19 — firmly in the CRITICAL zone.
+#  output logit. With bias=+6, expert 0 receives ~99.8% of the softmax mass
+#  regardless of input, giving normalised entropy ≈ 0.04 — firmly in the
+#  CRITICAL zone even after accounting for real top-2 slot sharing (see
+#  Section 1's note on probability vs. empirical entropy).
 #
 #  Using a bias (additive, input-independent) instead of weight scaling
 #  (multiplicative, input-dependent) makes the collapse fully deterministic:
@@ -186,9 +188,9 @@ def section_1_build_checkpoints(
                     Normalised entropy ≈ 1.00.
 
     checkpoint_B  — later training, routing has collapsed.
-                    Expert 0's gate bias set to +4.0.
-                    Expert 0 attracts ~95% of tokens; experts 1–3 starve.
-                    Normalised entropy ≈ 0.19 (below CRITICAL threshold 0.40).
+                    Expert 0's gate bias set to +6.0.
+                    Expert 0 attracts ~99.8% of tokens; experts 1–3 starve.
+                    Normalised entropy ≈ 0.04 (below CRITICAL threshold 0.40).
 
   Why bias instead of weight scaling?
     Bias is input-independent, so the collapse is deterministic:
@@ -204,11 +206,11 @@ def section_1_build_checkpoints(
     # Checkpoint A — healthy
     ckpt_a = CheckpointMoE(d_model=32)
 
-    # Checkpoint B — collapsed: bias +4.0 on expert 0
+    # Checkpoint B — collapsed: bias +6.0 on expert 0
     ckpt_b = CheckpointMoE(d_model=32)
     ckpt_b.load_state_dict(ckpt_a.state_dict())   # identical base weights
     with torch.no_grad():
-        ckpt_b.gate.bias[0] = 4.0                 # expert 0 always gets +4 logit
+        ckpt_b.gate.bias[0] = 6.0                 # expert 0 always gets +6 logit
 
     # Measure entropy on the SAME fixed validation data used by audit()
     ent_a = ckpt_a.routing_entropy(xs_val)
@@ -221,10 +223,12 @@ def section_1_build_checkpoints(
     print(f"  checkpoint_B  prob_entropy = {ent_b:.4f}  fractions = {[f'{f:.3f}' for f in fra_b]}")
     print()
     print("  Note: audit() also reports *empirical* routing entropy from")
-    print("  actual top-k selections, not raw softmax probabilities.")
-    print("  With top_k=2 and expert 0 winning every slot for checkpoint_B,")
-    print("  empirical utilisation ≈ [1.0, 0.0, 0.0, 0.0] → entropy ≈ 0.0.")
-    print("  Both figures are correct; they measure different things.")
+    print("  actual top-k selections (top_k=2 here), not raw softmax probabilities.")
+    print("  With expert 0 winning one of its two slots on almost every token,")
+    print("  its empirical share comes out to ≈0.5 (out of 2 slots/token) while")
+    print("  experts 1-3 split the rest — a different but consistent picture")
+    print("  of the same collapse. Both figures are correct; they measure")
+    print("  different things.")
     print(f"\n  Both: {CheckpointMoE.N_EXPERTS} experts, top_k={CheckpointMoE.TOP_K}, d_model=32")
     return ckpt_a, ckpt_b
 
@@ -334,11 +338,11 @@ def section_4_read_report(report_a, report_b) -> None:
             bar   = "█" * int(score * 20)
             print(f"      {layer:<16}  [{bar:<20}]  {score:.4f}  {level}")
 
-        # checkpoint_A shows HIGH even with entropy ≈ 1.0.
-        # Reason: the fused risk score is 60% Tier-1 (gradient starvation).
-        # With_backward=False, Tier-1 is unavailable and contributes a
-        # non-zero baseline — raising the fused score into HIGH territory.
-        # The entropy and collapse signals (Tiers 2 & 3) are healthy.
+        # checkpoint_A shows LOW risk with entropy ≈ 1.0, as expected: with
+        # with_backward=False, Tier-1's weight is redistributed entirely to
+        # Tier-2 (entropy) rather than contributing a phantom non-zero
+        # baseline — so the fused score is driven purely by the (healthy)
+        # entropy and collapse signals here.
         # checkpoint_B is CRITICAL because its near-zero entropy dominates.
 
         print(f"\n    Entropy:")

@@ -346,7 +346,8 @@ class RouterForwardHook:
         """Infer the number of experts selected per token (``top_k``).
 
         Checks common attribute names on the gate module first, then walks
-        to the parent MoE block, before falling back to a conservative
+        to the parent MoE block (or the root model itself, when the gate
+        has no dotted parent path), before falling back to a conservative
         default of ``k=1``.
 
         Without the parent-walk, a bare ``nn.Linear`` gate (which carries
@@ -366,7 +367,10 @@ class RouterForwardHook:
         layer_name : str, optional
             Fully-qualified name of the gate module (e.g.
             ``"layers.5.mlp.gate"``). Used to derive the parent name
-            ``"layers.5.mlp"`` for the attribute walk.
+            ``"layers.5.mlp"`` for the attribute walk. A name with no
+            dot (e.g. ``"gate"``) means the gate is a direct top-level
+            attribute of the root model — the root model itself is then
+            treated as the parent to check.
 
         Returns
         -------
@@ -382,16 +386,33 @@ class RouterForwardHook:
                 return min(value, expert_count)
 
         # 2. Walk to parent MoE block and check there.
-        if model is not None and layer_name and "." in layer_name:
-            parent_name = layer_name.rsplit(".", 1)[0]
-            try:
-                parent = model.get_submodule(parent_name)
+        if model is not None and layer_name:
+            if "." in layer_name:
+                parent_name = layer_name.rsplit(".", 1)[0]
+                try:
+                    parent = model.get_submodule(parent_name)
+                except AttributeError:
+                    parent = None
+            else:
+                # No dot in layer_name: the gate is a direct top-level
+                # attribute of the root model (e.g. `self.gate = ...`
+                # with no nesting under a submodule) — a common shape
+                # for small/custom MoE models, including this library's
+                # own example models. Architecturally the root model
+                # itself IS the parent in this case. Without this
+                # branch, such models always fell through to the k=1
+                # default below regardless of their real top_k, silently
+                # reporting top-1 routing (and therefore near-1.0
+                # utilization for whichever expert wins that single
+                # slot) on a model that actually routes to k>1 experts
+                # per token.
+                parent = model
+
+            if parent is not None:
                 for attr in _ATTRS:
                     value = getattr(parent, attr, None)
                     if isinstance(value, int) and value > 0:
                         return min(value, expert_count)
-            except AttributeError:
-                pass
 
         return min(1, expert_count)
 
