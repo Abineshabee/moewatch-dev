@@ -755,9 +755,9 @@ def _run_single_forward(
 
     Forward call strategy (in order):
       1. ``dict`` batch        → ``model(**batch)``
-      2. ``tuple``/``list``    → ``model(*batch)``
+      2. ``tuple``/``list``    → ``model(*batch)`` when supported,
+                                  otherwise ``model(batch[0])``
       3. ``tensor`` / other    → ``model(batch)``
-      4. ``TypeError`` fallback → ``model(batch)``
 
     Parameters
     ----------
