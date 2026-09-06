@@ -334,7 +334,19 @@ class WatchConfig:
     Default: None (auto-detect).
     """
 
-    intervention_enabled: bool = True
+    intervention_enabled: bool = False
+    """Whether the intervention engine is active.
+
+    When ``False`` (the default), MoEWatch runs in observation-only mode:
+    it detects and alerts on routing collapse but never modifies the model
+    or training dynamics. Set to ``True`` explicitly to enable automatic
+    corrective interventions (AuxLossAction, RouterNoiseAction,
+    ExpertDropoutAction).
+
+    Keeping the default ``False`` follows the principle of least surprise:
+    a monitoring library should not silently alter training behaviour
+    unless the user has explicitly opted in.
+    """
     """Enable the intervention engine.
 
     When False, MoEWatch runs in observation-only mode: all signals are

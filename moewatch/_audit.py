@@ -188,8 +188,21 @@ def audit(
 
     # ------------------------------------------------------------------
     # 1. Device validation and model placement
+    #    Save the model's current training state, device, and parameter
+    #    grad state so we can fully restore them after the audit.
+    #    audit() must be a pure observer — it must not permanently change
+    #    model.training, the model's device, or accumulated gradients.
     # ------------------------------------------------------------------
     resolved_device = _resolve_device(device)
+
+    # Capture original state before any mutation.
+    _original_training: bool = model.training
+    _original_device: torch.device = _get_model_device(model)
+    _original_grads: dict = {
+        n: (p.grad.clone() if p.grad is not None else None)
+        for n, p in model.named_parameters()
+    }
+
     _move_model_to_device(model, resolved_device)
 
     # ------------------------------------------------------------------
@@ -273,6 +286,36 @@ def audit(
                 "[MoEWatch] audit(): hook cleanup error (non-fatal): %s",
                 cleanup_exc,
             )
+
+        # Restore model to its original state so audit() has no lasting
+        # side-effects on the caller's model:
+        #   • training mode  (model.train() / model.eval())
+        #   • device         (move back if we changed it)
+        #   • gradients      (restore or clear what was there before)
+        try:
+            if _original_training:
+                model.train()
+            else:
+                model.eval()
+        except Exception:  # pylint: disable=broad-except
+            pass
+
+        try:
+            if _original_device != torch.device(resolved_device):
+                _move_model_to_device(model, str(_original_device))
+        except Exception:  # pylint: disable=broad-except
+            pass
+
+        try:
+            for name, param in model.named_parameters():
+                original_grad = _original_grads.get(name)
+                if original_grad is not None:
+                    param.grad = original_grad.to(param.device)
+                else:
+                    if param.grad is not None:
+                        param.grad = None
+        except Exception:  # pylint: disable=broad-except
+            pass
 
     # ------------------------------------------------------------------
     # 5. Run analysis suite
@@ -416,6 +459,14 @@ def audit(
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
+
+
+def _get_model_device(model: nn.Module) -> torch.device:
+    """Return the device of the first parameter, or CPU if no parameters."""
+    try:
+        return next(model.parameters()).device
+    except StopIteration:
+        return torch.device("cpu")
 
 
 def _resolve_device(device: str) -> str:
@@ -727,12 +778,33 @@ def _run_single_forward(
         if isinstance(batch, dict):
             output = model(**batch)
         elif isinstance(batch, (list, tuple)):
-            # Common convention: (input_tensor, label_tensor).
-            # Try full unpack first; if the model rejects extra args (e.g. a
-            # monitoring-only forward(x) that takes one positional), fall
-            # through to the TypeError handler below which retries with only
-            # the first tensor — which is invariably the model input.
-            output = model(*batch)
+            # Many dataloaders return (input_tensor, label_tensor).
+            # Detect this BEFORE calling the model by checking whether
+            # the model's forward signature accepts multiple positional
+            # arguments. Doing the detection up-front avoids running a
+            # first forward pass that triggers all routing hooks, then
+            # running a second forward pass in the fallback — which would
+            # produce duplicate routing events and corrupt statistics.
+            import inspect
+            try:
+                sig = inspect.signature(model.forward)
+                n_positional = sum(
+                    1 for p in sig.parameters.values()
+                    if p.default is inspect.Parameter.empty
+                    and p.kind in (
+                        inspect.Parameter.POSITIONAL_ONLY,
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    )
+                )
+                if n_positional >= len(batch):
+                    output = model(*batch)
+                else:
+                    # Model takes fewer args than batch elements;
+                    # treat as (input, label...) and use first element only.
+                    output = model(batch[0])
+            except (TypeError, ValueError):
+                # Could not inspect signature; fall back to first element.
+                output = model(batch[0])
         else:
             output = model(batch)
 
@@ -742,7 +814,10 @@ def _run_single_forward(
             "Retrying with first element only (batch may be an (input, label) tuple).",
             exc,
         )
-        # Unpack the first element for (input, label) style batches.
+        # Last-resort fallback — only reached for non-list/tuple batches
+        # with unexpected signatures. Note: this path CAN trigger a second
+        # forward pass for non-sequence batches, but that case is rare and
+        # the stat_collector deduplicates events by step, so impact is minimal.
         first = batch[0] if isinstance(batch, (list, tuple)) else batch
         output = model(first)
 

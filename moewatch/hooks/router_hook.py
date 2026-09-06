@@ -246,12 +246,35 @@ class RouterForwardHook:
                 for dim_size in logits_detached.shape[:-1]:
                     batch_size *= int(dim_size)
 
+                # Memory fix: immediately reduce full [batch*seq, n_experts]
+                # tensors to compact CPU representations before storing in
+                # the ring buffer.
+                #
+                # Without this, each RoutingEvent holds:
+                #   routing_logits:   [batch*seq, n_experts] float32
+                #   selected_experts: [batch*seq, top_k]    int64
+                # For Mixtral (batch=1, seq=2048, n_experts=8): ~96 KB/event.
+                # With 1000-event buffers × 32 layers = ~3 GB — OOM risk.
+                #
+                # Fix: reduce to CPU immediately:
+                #   routing_logits   → mean softmax prob (n_experts,) CPU  ~256 B
+                #   selected_experts → flat index tensor CPU               ~seq*top_k B
+                # stat_collector.get_all_stats() calls torch.bincount() on
+                # selected_experts (needs index values, not pre-aggregated
+                # counts), and _stack_logits_window() stacks routing_logits
+                # (1-D mean-prob vectors work for entropy computation).
+                probs = torch.softmax(
+                    logits_detached.reshape(-1, expert_count).float(), dim=-1
+                )
+                mean_probs_cpu = probs.mean(dim=0).cpu()          # (n_experts,)
+                selected_experts_cpu = selected_experts.reshape(-1).cpu()  # flat indices
+
                 event = RoutingEvent(
                     timestamp=time.time(),
                     global_step=self._global_step,
                     layer_name=self.layer_name,
-                    routing_logits=logits_detached,
-                    selected_experts=selected_experts,
+                    routing_logits=mean_probs_cpu,         # compact (n_experts,) CPU
+                    selected_experts=selected_experts_cpu, # flat indices, CPU
                     expert_count=int(expert_count),
                     batch_size=int(batch_size),
                 )
