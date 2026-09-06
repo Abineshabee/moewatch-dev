@@ -32,15 +32,12 @@
 #                    This crossing of the configured thresholds is the
 #                    signal MoEWatch detects.
 #
-#                  - The fused risk score stays in the HIGH band (≥0.6)
-#                    even during the healthy phase because the risk fuser's
-#                    Tier-1 (gradient starvation) component is calibrated
-#                    for production-scale gradient norms. In a real run
-#                    (Mixtral, DeepSeek-MoE) the score correctly spans
-#                    0.0–1.0; in this small demo model the gradient norms
-#                    are too small relative to cold_threshold to produce a
-#                    low Tier-1 score. The entropy and alert signals are
-#                    clean and trustworthy regardless of model scale.
+#                  - The fused risk score uses relative Tier-1 calibration:
+#                    starvation is detected relative to the layer's own
+#                    median expert norm, so it self-calibrates to any model
+#                    scale. Healthy phase → LOW risk; collapse phase → MID/HIGH;
+#                    recovered phase → LOW again. Entropy and alert signals
+#                    are the clearest indicators in this short demo.
 #
 #                No GPU or HuggingFace Trainer required.
 #
@@ -249,6 +246,14 @@ def section_2_configure() -> WatchConfig:
     whatever gradient-norm scale a model actually produces — no manual
     tuning needed even for this tiny demo model's ~0.001–0.1 norms.
 
+  Note on interventions in this demo:
+    Interventions are enabled (policy_type="rule") but the 45-step window
+    is short and intervention_cooldown=10. The policy selects an action
+    when risk >= 0.3; the cascade guard then applies (same action repeating
+    > 3 times without improvement → downgraded to noop). You will see
+    "Downgraded: 1" in the intervention log — that is the guard working
+    correctly, not a failure. Section 6 explains this in full.
+
   Other settings (shortened proportionally for a 45-step demo):
     cold_steps_limit      =  8  (default  50  — steps before DEAD alert)
     reward_window_steps   =  8  (default  50  — evaluation window)
@@ -319,6 +324,14 @@ def section_4_5_6_training_loop(model: DemoMoE, watch: MoEWatch) -> None:
   Watch it drop sharply at step 16 and recover at step 36.
 
   Entropy thresholds:  warn < 0.70   critical < 0.40
+
+  Why does the first alert appear ~11 steps after entropy drops?
+    Entropy threshold crossings are detected by CUSUM (Cumulative Sum),
+    not a simple per-step threshold check. CUSUM accumulates evidence
+    over multiple steps before firing — this trades a few steps of lag
+    for robustness against transient noise. Once it fires, it resets
+    and begins accumulating again, which is why alerts continue to fire
+    on subsequent steps at a regular cadence rather than every step.
 """)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
 
@@ -531,9 +544,9 @@ def section_7_summary(watch: MoEWatch) -> None:
     print(f"  {'─' * 54}")
     for layer, score in summary.items():
         if score >= 0.8:   label = "CRITICAL"
-        elif score >= 0.6: label = "HIGH (see calibration note above)"
+        elif score >= 0.6: label = "HIGH"
         elif score >= 0.3: label = "MID"
-        else:              label = "LOW ✓"
+        else:              label = "LOW ✓  (T1 relative calibration working correctly)"
         print(f"  {layer:<20}  {score:>12.4f}  {label}")
 
     print(f"\n  WatchReport step records       : {len(watch.watch_report.steps)}")

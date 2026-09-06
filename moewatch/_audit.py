@@ -341,12 +341,13 @@ def audit(
         cross_layer_result=cross_layer_result,
         risk_fuser=risk_fuser,
         RiskLevel=RiskLevel,
+        gradient_available=with_backward,
     )
 
     # ------------------------------------------------------------------
     # 6. Aggregate summary statistics
     # ------------------------------------------------------------------
-    dead_experts_count = _count_dead_experts(gradient_results, config)
+    dead_experts_count = _count_dead_experts(gradient_results, config) if with_backward else 0
     model_name = type(model).__name__
 
     audit_duration = time.time() - audit_start_time
@@ -405,6 +406,7 @@ def audit(
         dead_experts_count=dead_experts_count,
         critical_layers=critical_layers,
         alerts=audit_alerts,
+        gradient_available=with_backward,
     )
 
 
@@ -751,6 +753,7 @@ def _fuse_risk_scores(
     cross_layer_result: object,
     risk_fuser: object,
     RiskLevel: type,
+    gradient_available: bool = True,
 ) -> Tuple[Dict, List[str]]:
     """Fuse per-layer Tier 1 / Tier 2 / Tier 3 signals into risk scores.
 
@@ -776,6 +779,10 @@ def _fuse_risk_scores(
         Initialized risk fuser instance.
     RiskLevel : type
         ``RiskLevel`` enum class (passed in to avoid re-importing here).
+    gradient_available : bool, optional
+        Whether a backward pass was run. When ``False``, experts with no
+        gradient samples are treated as *unavailable* (T1 skipped) rather
+        than *fully starved* -- "no gradient measured" != "gradient is zero".
 
     Returns
     -------
@@ -843,10 +850,18 @@ def _fuse_risk_scores(
                         key=lambda r: _n(r),
                     )
                 elif no_data:
-                    # No hook events → expert never routed to → fully starved.
-                    # Override starvation_score to 1.0 so the fuser sees
-                    # the correct T1 signal.
-                    grad_report = dataclasses.replace(no_data[0], starvation_score=1.0)
+                    if gradient_available:
+                        # Backward was run but expert had no events:
+                        # never routed to → fully starved.
+                        grad_report = dataclasses.replace(no_data[0], starvation_score=1.0)
+                    else:
+                        # Backward NOT run: no_data means "not measured",
+                        # not "starved". Use a zero-score dummy so fusion
+                        # still runs; t1_available=False in fuse() will
+                        # redistribute T1's weight to T2/T3.
+                        grad_report = dataclasses.replace(
+                            no_data[0], starvation_score=0.0
+                        )
                 elif has_data:
                     # All experts received gradients; pick the most starved.
                     grad_report = max(
@@ -859,9 +874,10 @@ def _fuse_risk_scores(
                         key=lambda r: r.starvation_score,
                     )
 
-            # Both Tier 1 and Tier 2 are required for meaningful fusion.
-            # If either is missing, skip this layer rather than producing
-            # a meaningless or misleading risk score.
+            # Entropy (Tier 2) is required for fusion. Gradient (Tier 1)
+            # may be a zero-score dummy when with_backward=False — that is
+            # handled by passing t1_available=False to fuse(), which
+            # redistributes T1's weight to T2/T3 rather than skipping.
             if ent_report is None or grad_report is None:
                 logger.debug(
                     "[MoEWatch] audit(): skipping risk fusion for layer '%s' "
@@ -876,6 +892,7 @@ def _fuse_risk_scores(
                 gradient_report=grad_report,
                 entropy_report=ent_report,
                 cross_layer_report=cross_layer_result,
+                t1_available=gradient_available,
             )
             risk_scores[layer_name] = risk_report
 

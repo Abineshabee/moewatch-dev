@@ -237,6 +237,7 @@ class RiskScoreFuser:
         gradient_report: object,
         entropy_report: object,
         cross_layer_report: Optional[object] = None,
+        t1_available: bool = True,
     ) -> RiskReport:
         """Fuse three tier signals into a single RiskReport for one layer.
 
@@ -255,6 +256,12 @@ class RiskScoreFuser:
             Tier 3 signal.  Must expose ``spread_score`` (float [0,1]) and
             ``victim_layers`` (list).  If None, Tier 3 contribution is 0.0
             and its weight is redistributed proportionally to Tier 1 and Tier 2.
+        t1_available : bool, optional
+            Whether the Tier-1 gradient signal was actually collected.
+            When ``False`` (e.g. ``audit(with_backward=False)``), T1's weight
+            is redistributed to Tier 2 and Tier 3 so the fused score is driven
+            only by entropy and cross-layer signals.  "No gradient measured"
+            is treated as unavailable, not as zero.
 
         Returns
         -------
@@ -313,7 +320,10 @@ class RiskScoreFuser:
         # ------------------------------------------------------------------
         # Resolve effective weights (redistribute T3 weight if no T3 data)
         # ------------------------------------------------------------------
-        w1, w2, w3 = self._resolve_weights(t3_available=(cross_layer_report is not None))
+        w1, w2, w3 = self._resolve_weights(
+            t3_available=(cross_layer_report is not None),
+            t1_available=t1_available,
+        )
 
         # ------------------------------------------------------------------
         # Weighted fusion
@@ -446,17 +456,23 @@ class RiskScoreFuser:
         return RiskLevel.LOW
 
     def _resolve_weights(
-        self, t3_available: bool
+        self, t3_available: bool, t1_available: bool = True
     ) -> tuple:
         """Return effective (w1, w2, w3) fusion weights.
 
         When T3 data is unavailable, the T3 weight is redistributed to T1
-        and T2 in proportion to their existing shares.
+        and T2 in proportion to their existing shares.  When T1 data is
+        unavailable (e.g. ``with_backward=False`` in an offline audit), the
+        T1 weight is redistributed proportionally to T2 and T3, so the fused
+        score is driven purely by entropy and cross-layer signals.
 
         Parameters
         ----------
         t3_available : bool
             Whether a valid cross-layer report was supplied.
+        t1_available : bool, optional
+            Whether gradient-starvation data was collected.  False when
+            ``with_backward=False`` was used in ``audit()``.
 
         Returns
         -------
@@ -466,6 +482,17 @@ class RiskScoreFuser:
         w1 = self.weights["tier1"]
         w2 = self.weights["tier2"]
         w3 = self.weights["tier3"]
+
+        if not t1_available and w1 > 0.0:
+            # Redistribute T1 weight entirely to T2 (entropy).
+            # Do NOT give any to T3: T3 (cross-layer spread) measures a
+            # separate structural signal; boosting it with T1's weight when
+            # gradient data is simply unavailable would incorrectly inflate
+            # or deflate risk depending on the spread_score. In an offline
+            # audit with_backward=False, entropy is the only reliable signal,
+            # so all unavailable weight should flow there.
+            w2 = w2 + w1
+            w1 = 0.0
 
         if not t3_available and w3 > 0.0:
             # Redistribute T3 weight proportionally to T1 and T2.

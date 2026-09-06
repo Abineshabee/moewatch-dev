@@ -197,6 +197,7 @@ class AuditReport:
     dead_experts_count: int = 0
     critical_layers: List[str] = field(default_factory=list)
     alerts: List = field(default_factory=list)  # List[Alert] — avoids circular import
+    gradient_available: bool = True  # False when audit(with_backward=False)
 
     # ------------------------------------------------------------------
     # Read-only derived properties
@@ -379,27 +380,36 @@ class AuditReport:
         lines.append("")
 
         # Gradient starvation summary
-        starved = self.gradient_starved_experts()
-        if starved:
-            lines.append(
-                f"  Gradient-starved experts (norm < 0.01) : {len(starved)}"
-            )
-            for layer_name, eid, norm in starved[:5]:
-                lines.append(
-                    f"    — expert {eid:>3d}  norm={norm:.5f}  in  {layer_name}"
-                )
-            if len(starved) > 5:
-                lines.append(f"    ... and {len(starved) - 5} more")
+        if not self.gradient_available:
+            lines.append("  Gradient analysis : not available (audit run with with_backward=False).")
+            lines.append("  Tip: run audit(with_backward=True) in a training loop for Tier-1 signal.")
         else:
-            lines.append("  No gradient-starved experts detected.")
+            starved = self.gradient_starved_experts()
+            if starved:
+                lines.append(
+                    f"  Gradient-starved experts (norm < 0.01) : {len(starved)}"
+                )
+                for layer_name, eid, norm in starved[:5]:
+                    lines.append(
+                        f"    — expert {eid:>3d}  norm={norm:.5f}  in  {layer_name}"
+                    )
+                if len(starved) > 5:
+                    lines.append(f"    ... and {len(starved) - 5} more")
+            else:
+                lines.append("  No gradient-starved experts detected.")
         lines.append("")
 
         # Entropy summary
         if self.entropy_results:
+            # Use risk_scores to determine entropy alert level —
+            # LayerEntropyReport has no alert_level field.
+            # A layer is flagged if its risk_level is HIGH or CRITICAL.
             critical_entropy = [
                 (name, r)
                 for name, r in self.entropy_results.items()
-                if getattr(r, "alert_level", None) in ("WARNING", "CRITICAL")
+                if name in self.risk_scores
+                and self.risk_scores[name].risk_level.value
+                in ("HIGH", "CRITICAL")
             ]
             lines.append(
                 f"  Entropy alerts : {len(critical_entropy)} layer(s) with"
@@ -447,6 +457,7 @@ class AuditReport:
             "num_batches": self.num_batches,
             "num_layers": self.num_layers,
             "dead_experts_count": self.dead_experts_count,
+            "gradient_available": self.gradient_available,
             "critical_layers": list(self.critical_layers),
             "entropy_results": {
                 k: _to_serializable(v)
@@ -565,7 +576,8 @@ class AuditReport:
             if er is not None:
                 row["entropy_norm"] = getattr(er, "entropy_norm", None)
                 row["entropy_trend"] = getattr(er, "trend", None)
-                row["entropy_alert"] = getattr(er, "alert_level", None)
+                rr = self.risk_scores.get(layer_name)
+                row["entropy_alert"] = rr.risk_level.value if rr else None
             else:
                 row["entropy_norm"] = None
                 row["entropy_trend"] = None
