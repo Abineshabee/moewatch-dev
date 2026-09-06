@@ -591,3 +591,169 @@ class TestInterventionLog:
         # A downgrade log entry should have been added if layer was active
         if layer in engine._active_interventions:
             assert len(engine._intervention_log) > log_before
+
+
+# ===========================================================================
+# ── Regression: RouterNoiseAction hook ordering (prepend=True) ──────────────
+# ===========================================================================
+
+
+class TestRouterNoiseActionHookOrdering:
+    """Regression tests for the RouterNoiseAction measurement-correctness bug.
+
+    Prior to the fix, ``RouterNoiseAction`` registered its forward hook with
+    the default ``prepend=False``.  Because ``RouterForwardHook`` (MoEWatch's
+    monitoring hook) is registered first during ``HookManager.attach()``,
+    PyTorch executed it *before* the noise hook, so MoEWatch observed the
+    original pre-noise logits while the model actually consumed the
+    post-noise ones.  The fix uses ``prepend=True`` so the noise hook fires
+    first, and the monitoring hook then sees the already-noised output.
+    """
+
+    # ------------------------------------------------------------------
+    # Minimal test fixtures
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _make_model():
+        """Return a tiny MoE whose router always outputs [1.0, 0.0]."""
+        import torch
+        import torch.nn as nn
+
+        class DeterministicRouter(nn.Module):
+            def forward(self, x):
+                return torch.tensor([[1.0, 0.0]])
+
+        class TinyMoE(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.router = DeterministicRouter()
+
+            def forward(self, x):
+                return self.router(x)
+
+        return TinyMoE()
+
+    # ------------------------------------------------------------------
+    # Core regression test
+    # ------------------------------------------------------------------
+
+    def test_monitoring_hook_observes_post_noise_output(self) -> None:
+        """MoEWatch must record the noised logits, not the original ones.
+
+        Simulates the exact runtime scenario that was broken:
+
+        1. A monitoring hook is registered first (as HookManager does).
+        2. RouterNoiseAction is applied (registers its hook second).
+        3. After a forward pass, the monitoring hook's recorded output
+           must match the model's actual (noisy) output, not the original
+           clean logits.
+        """
+        import torch
+
+        model = self._make_model()
+        recorded_by_monitor: list = []
+
+        # Step 1 — monitoring hook registered FIRST (mirrors HookManager)
+        def monitoring_hook(module, input, output):
+            recorded_by_monitor.append(output.detach().clone())
+
+        monitor_handle = model.router.register_forward_hook(monitoring_hook)
+
+        # Step 2 — RouterNoiseAction registered AFTER (mirrors InterventionEngine)
+        action = RouterNoiseAction(layer_name="router", noise_scale=10.0)
+        action.apply(model)
+
+        # Step 3 — forward pass
+        model_output = model(torch.zeros(1))
+
+        assert len(recorded_by_monitor) == 1, "Monitoring hook should have fired once."
+
+        # The monitor must have seen the same tensor the model received.
+        assert torch.allclose(recorded_by_monitor[0], model_output), (
+            "RouterNoiseAction hook ordering bug: MoEWatch recorded the "
+            "pre-noise logits instead of the post-noise logits that the "
+            "model actually used."
+        )
+
+        # Sanity-check: the output must actually be noisy (not the original).
+        original = torch.tensor([[1.0, 0.0]])
+        assert not torch.allclose(model_output, original), (
+            "Expected noisy output but got the clean original — "
+            "noise injection may not be working."
+        )
+
+        # Cleanup
+        monitor_handle.remove()
+        action.revert(model)
+
+    def test_monitoring_hook_sees_clean_output_without_noise_action(self) -> None:
+        """Baseline: monitoring hook sees clean output when no noise is active."""
+        import torch
+
+        model = self._make_model()
+        recorded: list = []
+
+        handle = model.router.register_forward_hook(
+            lambda m, i, o: recorded.append(o.detach().clone())
+        )
+        model(torch.zeros(1))
+
+        original = torch.tensor([[1.0, 0.0]])
+        assert torch.allclose(recorded[0], original), (
+            "Without RouterNoiseAction, the router should output the clean logits."
+        )
+        handle.remove()
+
+    def test_revert_restores_clean_output(self) -> None:
+        """After revert(), the router returns to its original clean output."""
+        import torch
+
+        model = self._make_model()
+        action = RouterNoiseAction(layer_name="router", noise_scale=10.0)
+        action.apply(model)
+        action.revert(model)
+
+        out = model(torch.zeros(1))
+        original = torch.tensor([[1.0, 0.0]])
+        assert torch.allclose(out, original), (
+            "After RouterNoiseAction.revert(), router output should be clean."
+        )
+
+    def test_noise_hook_prepend_position(self) -> None:
+        """The noise hook must be prepended so it fires before other hooks.
+
+        Verifies hook execution order by checking that the router's output
+        after RouterNoiseAction.apply() is noisy — if prepend=True is
+        working, the noise hook is first in the chain and all subsequent
+        hooks (including the monitoring hook) see the already-modified tensor.
+        """
+        import torch
+
+        model = self._make_model()
+
+        # Register a monitoring hook first (mirrors HookManager)
+        recorded_by_monitor: list = []
+        model.router.register_forward_hook(
+            lambda m, i, o: recorded_by_monitor.append(o.detach().clone())
+        )
+
+        action = RouterNoiseAction(layer_name="router", noise_scale=10.0)
+        action.apply(model)
+
+        out = model(torch.zeros(1))
+
+        # The model output must be noisy (noise injection is active)
+        original = torch.tensor([[1.0, 0.0]])
+        assert not torch.allclose(out, original), (
+            "Router output should be noisy after RouterNoiseAction is applied."
+        )
+
+        # The monitor (registered before the noise hook) must also observe
+        # the noisy output — this is the key ordering assertion.
+        assert torch.allclose(recorded_by_monitor[0], out), (
+            "Monitoring hook should observe the post-noise output (prepend=True "
+            "ensures noise hook runs before the monitor, not after)."
+        )
+
+        action.revert(model)

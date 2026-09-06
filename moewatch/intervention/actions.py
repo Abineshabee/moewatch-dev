@@ -663,11 +663,16 @@ class RouterNoiseAction(InterventionAction):
 
             return output
 
-        self._hook_handle = module.register_forward_hook(_noise_hook)
+        # prepend=True ensures the noise hook runs BEFORE RouterForwardHook
+        # (which is registered earlier by HookManager). PyTorch executes
+        # forward hooks in registration order; without prepend the monitoring
+        # hook would observe the pre-noise logits while the model actually
+        # receives the post-noise ones — a measurement correctness bug.
+        self._hook_handle = module.register_forward_hook(_noise_hook, prepend=True)
 
         logger.info(
             "[MoEWatch] RouterNoiseAction: registered noise injection "
-            "hook (std=%.4f) on '%s'.",
+            "hook (std=%.4f) on '%s' (prepend=True).",
             noise_scale,
             self.layer_name,
         )
