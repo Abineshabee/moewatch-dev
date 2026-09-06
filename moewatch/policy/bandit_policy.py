@@ -157,7 +157,7 @@ class BanditPolicy(PolicyBase):
         Returns
         -------
         InterventionAction
-            The selected action, targeting ``layer_name = f"layer_{state.layer_id}"``.
+            The selected action, targeting ``layer_name = state.layer_name if state.layer_name else f"layer_{state.layer_id}"``.
 
         Notes
         -----
@@ -202,7 +202,7 @@ class BanditPolicy(PolicyBase):
 
         counts_for_state[action_name] = counts_for_state.get(action_name, 0) + 1
 
-        layer_name = f"layer_{state.layer_id}"
+        layer_name = state.layer_name if state.layer_name else f"layer_{state.layer_id}"
 
         logger.debug(
             "[MoEWatch] BanditPolicy: step=%d state_key='%s' mode=%s "

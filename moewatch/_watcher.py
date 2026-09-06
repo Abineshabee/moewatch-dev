@@ -951,7 +951,7 @@ class MoEWatch:
                     continue
                 level = (
                     AlertLevel.CRITICAL
-                    if report.gradient_norm_mean < self.config.dead_threshold
+                    if report.starvation_score > 0.9
                     else AlertLevel.WARNING
                 )
                 alerts.append(
