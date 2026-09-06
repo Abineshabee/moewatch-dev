@@ -240,32 +240,6 @@ class InterventionEngine:
                 downgraded.mark_applied(step)
                 return downgraded
 
-            # A previously successful intervention is still installed in the
-            # model. Revert it now so the new action starts from a clean
-            # baseline and hooks do not accumulate.
-            if action.layer_name in self._persistent_interventions:
-                old_action, old_step = self._persistent_interventions.pop(
-                    action.layer_name
-                )
-                old_action.revert(self.model)
-                logger.info(
-                    "[MoEWatch] InterventionEngine: reverted persistent %s "
-                    "(applied step %d) on layer '%s' to make way for new "
-                    "intervention.",
-                    old_action.log(),
-                    old_step,
-                    action.layer_name,
-                )
-                self._intervention_log.append(
-                    {
-                        "event": "persistent_reverted",
-                        "step": step,
-                        "layer": action.layer_name,
-                        "reverted_action": old_action.action_type,
-                        "reverted_applied_step": old_step,
-                    }
-                )
-
         if not isinstance(action, NoOpAction) and action.is_global_resource:
             conflicting_layer = self._find_conflicting_global_intervention(action)
             if conflicting_layer is not None:
@@ -280,8 +254,12 @@ class InterventionEngine:
                 #   - The existing action's revert() will restore the coef to
                 #     its pre-first-apply value, which is correct — all
                 #     accumulated increases are unwound together.
-                existing_action, _ = self._active_interventions[conflicting_layer]
-                existing_action.apply(self.model)  # idempotent on AuxLoss
+                existing_action, _ = self._active_interventions.get(
+                    conflicting_layer,
+                    self._persistent_interventions.get(conflicting_layer, (None, None)),
+                )
+                if existing_action is not None:
+                    existing_action.apply(self.model)  # idempotent on AuxLoss
                 # Force a fresh delta by bypassing the idempotency guard:
                 # directly call apply on the *new* action object (which has
                 # no _original_coef set yet) so its delta is added on top.
@@ -325,6 +303,45 @@ class InterventionEngine:
                 }
             )
             result.recommended_action.mark_applied(step)
+            # Safety guard rejected the new proposal — the persistent
+            # intervention (if any) must NOT be lost.  We deliberately have
+            # NOT reverted it yet; simply return the downgraded NoOp and
+            # leave the persistent entry untouched.
+            return result.recommended_action
+
+        # Safety guard PASSED.  Only NOW is it safe to revert any existing
+        # persistent intervention to make room for the new one.
+        #
+        # Doing the revert here (after the safety check) rather than before
+        # it fixes the lifecycle bug: a persistent intervention was previously
+        # popped and reverted before safety_guard.check() ran.  If the check
+        # then rejected the new proposal, the persistent action was gone and
+        # the model was left in a clean (un-intervened) state without any
+        # record of it — silently discarding a previously successful runtime
+        # intervention.
+        if not isinstance(action, NoOpAction):
+            if action.layer_name in self._persistent_interventions:
+                old_action, old_step = self._persistent_interventions.pop(
+                    action.layer_name
+                )
+                old_action.revert(self.model)
+                logger.info(
+                    "[MoEWatch] InterventionEngine: reverted persistent %s "
+                    "(applied step %d) on layer '%s' to make way for new "
+                    "intervention (safety check already passed).",
+                    old_action.log(),
+                    old_step,
+                    action.layer_name,
+                )
+                self._intervention_log.append(
+                    {
+                        "event": "persistent_reverted",
+                        "step": step,
+                        "layer": action.layer_name,
+                        "reverted_action": old_action.action_type,
+                        "reverted_applied_step": old_step,
+                    }
+                )
 
         return result.recommended_action
 
@@ -582,7 +599,18 @@ class InterventionEngine:
         actions never conflict this way, since each targets its own
         distinct submodule.
         """
-        for other_layer, (other_action, _) in self._active_interventions.items():
+        # Search both active and persistent interventions.
+        # A persistent AuxLossAction is still installed in the model and
+        # still owns the shared resource — a new proposal from a different
+        # layer must see it as a conflict.  Previously only
+        # _active_interventions was checked, so a persistent AuxLossAction
+        # was invisible and a second layer could start a competing one,
+        # both modifying the same router_aux_loss_coef field.
+        all_owned: Dict[str, Tuple[InterventionAction, int]] = {
+            **self._persistent_interventions,
+            **self._active_interventions,  # active takes precedence on key clash
+        }
+        for other_layer, (other_action, _) in all_owned.items():
             if (
                 other_layer != action.layer_name
                 and other_action.action_type == action.action_type
