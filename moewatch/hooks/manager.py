@@ -285,27 +285,53 @@ class HookManager:
             hook.set_global_step(global_step)
 
     def flush_missing_gradient_events(self, step: int = 0) -> None:
-        """No-op retained for API compatibility.
+        """Stamp zero-norm events for experts whose param hook did not fire.
 
-        Previously synthesised zero-norm events for per-param
-        ``GradientStarvationHook`` instances that did not fire (because
-        their expert received no tokens and therefore had no backward
-        edge). This complement step is no longer necessary:
-        :class:`MoEBlockGradientHook` fires once per MoE block rather
-        than once per parameter, reads all expert ``.grad`` attributes
-        inline, and explicitly records ``gradient_norm=0.0`` for any
-        expert whose ``grad is None`` — covering the dead-expert case
-        in the same pass that records live experts.
+        ``Tensor.register_hook`` only fires for parameters that participated
+        in the backward graph, i.e. experts that received at least one token
+        this step.  Experts that received zero tokens have no backward edge
+        and their hook is silently skipped by autograd.
+
+        This method iterates every registered :class:`GradientStarvationHook`
+        and, for any hook whose ``last_fired_step`` is not the current step,
+        writes a ``gradient_norm=0.0`` event so the downstream analyzer sees
+        a zero rather than a missing observation for that expert.
+
+        Called by :class:`~moewatch._watcher.MoEWatch` once per training
+        step, after ``optimizer.step()`` and before ``watch.step()``.
 
         Parameters
         ----------
         step : int, optional
-            Ignored. Retained so existing call sites do not need changes.
+            Current global training step. Defaults to 0 if not provided.
 
         Returns
         -------
         None
         """
+        import time as _time
+        ts = _time.time()
+        from moewatch.collector.stat_collector import GradientEvent
+
+        for hook in self._gradient_hooks:
+            if not isinstance(hook, GradientStarvationHook):
+                continue
+            if hook.last_fired_step == step:
+                continue  # hook already fired for this step — expert was routed
+
+            # Expert received no tokens this step: record a zero-norm event.
+            event = GradientEvent(
+                timestamp=ts,
+                global_step=step,
+                layer_name=hook.layer_name,
+                expert_id=hook.expert_id,
+                gradient_norm=0.0,
+                gradient_magnitude=0.0,
+            )
+            try:
+                hook.stat_collector.write_gradient_event(event)
+            except Exception:
+                pass  # never let flushing interrupt training
 
     # ------------------------------------------------------------------
     # Query interface
@@ -374,22 +400,20 @@ class HookManager:
     def _attach_gradient_hooks(
         self, layer_name: str, router_module: nn.Module
     ) -> None:
-        """Register one :class:`MoEBlockGradientHook` for the parent MoE block.
+        """Register per-expert Tensor.register_hook callbacks for gradient tracking.
 
-        Locates the expert weight parameters associated with
-        ``router_module``'s parent MoE block and registers a **single**
-        :class:`MoEBlockGradientHook` on that parent module via
-        ``register_full_backward_hook``.  This fires once per backward
-        pass per block rather than once per expert parameter, reducing the
-        number of Python→C++ hook invocations from
-        ``N_layers × N_experts`` (e.g. 28 × 64 = 1 792) to ``N_layers``
-        (28) — roughly a **64× reduction** in per-backward Python overhead.
+        Locates the expert weight parameters associated with the gate's
+        sibling ``nn.ModuleList`` and registers a ``Tensor.register_hook``
+        on the **first weight parameter of each expert** via
+        :class:`~moewatch.hooks.gradient_hook.GradientStarvationHook`.
 
-        The block-level hook reads each expert's ``.grad`` attribute
-        inline and records ``gradient_norm=0.0`` for experts whose
-        ``grad is None`` (i.e. experts that received no tokens and had no
-        backward edge), making the separate
-        :meth:`flush_missing_gradient_events` complement step redundant.
+        ``Tensor.register_hook`` fires *after* the gradient has been fully
+        accumulated into ``param.grad`` for that tensor — which is the
+        correct point to read it.  The previous approach used
+        ``register_full_backward_hook`` on the parent module, which fires
+        when the *module's* backward completes but *before* child weight
+        gradients are accumulated, so ``param.grad`` was always ``None``
+        inside that hook and every expert reported ``gradient_norm=0.0``.
 
         Parameters
         ----------
@@ -397,10 +421,9 @@ class HookManager:
             Fully-qualified name of the router module (e.g.
             ``"layers.5.mlp.gate"``). Used as the outer key in
             :class:`~moewatch.collector.stat_collector.StatCollector`'s
-            gradient buffers (unchanged from the per-param convention).
+            gradient buffers.
         router_module : torch.nn.Module
-            The router module instance; used to locate the parent MoE
-            block on which the hook is registered.
+            The router module instance; used only to derive the layer name.
 
         Returns
         -------
@@ -412,7 +435,7 @@ class HookManager:
         architecture where experts are not exposed as a discoverable
         ``nn.ModuleList`` sibling), this method logs at DEBUG level and
         returns without raising — gradient-starvation analysis for this
-        layer will simply be unavailable, while entropy/collapse analysis
+        layer will be unavailable, while entropy/collapse analysis
         (which only depends on routing events) continues to function.
         """
         expert_params = self._find_expert_weight_parameters(layer_name)
@@ -426,42 +449,32 @@ class HookManager:
             )
             return
 
-        # Resolve the parent MoE block to attach the module-level hook.
-        parent_name = self._parent_module_name(layer_name)
-        try:
-            parent_module = (
-                self.model.get_submodule(parent_name) if parent_name else self.model
-            )
-        except AttributeError:
-            logger.debug(
-                "[MoEWatch] HookManager: could not resolve parent module "
-                "'%s' for layer '%s'; gradient-starvation signal unavailable.",
-                parent_name,
-                layer_name,
-            )
-            return
+        registered = 0
+        for expert_id, param in enumerate(expert_params):
+            if param is None or not param.requires_grad:
+                continue
 
-        hook = MoEBlockGradientHook(
-            layer_name=layer_name,
-            expert_params=expert_params,
-            stat_collector=self.stat_collector,
-            config=self.config,
-        )
-        handle = parent_module.register_full_backward_hook(hook)
+            hook = GradientStarvationHook(
+                layer_name=layer_name,
+                expert_id=expert_id,
+                stat_collector=self.stat_collector,
+                config=self.config,
+            )
+            # Tensor.register_hook fires after param.grad is fully accumulated,
+            # which is the correct timing to read per-expert gradient norms.
+            handle = param.register_hook(hook)
 
-        self._handles.append(handle)
-        self._gradient_hooks.append(hook)
+            self._handles.append(handle)
+            self._gradient_hooks.append(hook)
+            registered += 1
 
         logger.debug(
-            "[MoEWatch] HookManager: registered 1 block-level gradient "
-            "hook for '%s' covering %d expert parameter(s).",
+            "[MoEWatch] HookManager: registered %d per-expert Tensor.register_hook "
+            "callback(s) for '%s'.",
+            registered,
             layer_name,
-            sum(1 for p in expert_params if p is not None and p.requires_grad),
         )
 
-    # ------------------------------------------------------------------
-    # Internal: model introspection
-    # ------------------------------------------------------------------
 
     def _infer_expert_count(self, router_module: nn.Module) -> int:
         """Infer the number of experts from a router module's shape.

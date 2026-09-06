@@ -347,7 +347,7 @@ def audit(
     # ------------------------------------------------------------------
     # 6. Aggregate summary statistics
     # ------------------------------------------------------------------
-    dead_experts_count = _count_dead_experts(gradient_results, config) if with_backward else 0
+    dead_experts_count = _count_dead_experts(gradient_results, config, collapse_results=collapse_results)
     model_name = type(model).__name__
 
     audit_duration = time.time() - audit_start_time
@@ -913,32 +913,56 @@ def _fuse_risk_scores(
 def _count_dead_experts(
     gradient_results: Dict,
     config: WatchConfig,
+    collapse_results: Optional[Dict] = None,
 ) -> int:
-    """Count total dead experts across all layers from gradient reports.
+    """Count total dead experts across all layers.
 
-    An expert is considered dead when its mean gradient norm falls below
-    ``config.dead_threshold``.
+    Uses ``collapse_results`` (CollapseDetector routing-utilization state)
+    as the primary source when available.  The CollapseDetector tracks how
+    many consecutive steps each expert has received zero routing weight —
+    an expert whose status is DEAD has been silent for at least
+    ``config.cold_steps_limit`` steps by routing criteria alone, independent
+    of gradient norms.
+
+    Falls back to counting experts whose gradient norm is below
+    ``config.dead_threshold`` only when ``collapse_results`` is not provided.
+    This fallback is unreliable in short audits (``with_backward=True``) because
+    the gradient hook used to register per-expert norms fires *during*
+    the backward pass via ``Tensor.register_hook`` — experts that were not
+    routed in a given step simply have no backward edge and contribute a
+    zero-norm observation, inflating the dead count even for healthy models.
 
     Parameters
     ----------
     gradient_results : dict[str, list[GradientStarvationReport]]
-        Output from ``GradientStarvationAnalyzer.analyze()``.
+        Output from ``GradientStarvationAnalyzer.analyze()``. Used as
+        fallback only when ``collapse_results`` is None.
     config : WatchConfig
         Configuration providing ``dead_threshold``.
+    collapse_results : dict[str, LayerCollapseReport] or None
+        Output from ``CollapseDetector.analyze()``. When provided,
+        expert DEAD status is read directly from the routing state machine.
 
     Returns
     -------
     int
         Total number of experts classified as dead.
     """
+    # Primary: use CollapseDetector routing-utilization state (reliable).
+    if collapse_results is not None:
+        dead_count = 0
+        for col_report in collapse_results.values():
+            try:
+                dead_count += col_report.num_dead_experts
+            except AttributeError:
+                pass
+        return dead_count
+
+    # Fallback: gradient-norm threshold (unreliable in short audits).
     dead_count = 0
     for expert_reports in gradient_results.values():
         for report in expert_reports:
             try:
-                # An expert is dead if:
-                #   (a) it received gradient events but norm stayed at zero, OR
-                #   (b) it was never routed to at all (n_samples == 0) — a
-                #       never-routed expert is dead by any practical definition.
                 if report.gradient_norm_mean < config.dead_threshold:
                     dead_count += 1
             except AttributeError:
