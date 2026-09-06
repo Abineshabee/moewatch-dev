@@ -141,6 +141,14 @@ class InterventionEngine:
         # per layer" invariant and stacking hooks on every new cycle.
         self._persistent_interventions: Dict[str, Tuple[InterventionAction, int]] = {}
 
+        # Staging area for persistent actions that have been validated by safety
+        # and are waiting to be atomically reverted inside apply_intervention().
+        # propose_intervention() parks old persistent actions here after safety
+        # passes. If apply_intervention() raises, the rescue path restores the
+        # entry to _persistent_interventions so the model is never left with
+        # neither the old nor the new intervention installed.
+        self._pending_reverts: Dict[str, Tuple[InterventionAction, int]] = {}
+
         # layer_name -> (start_step, end_step) observation window.
         self._observation_windows: Dict[str, Tuple[int, int]] = {}
 
@@ -303,20 +311,28 @@ class InterventionEngine:
                 noop.mark_applied(step)
                 return noop
 
-        # Safety PASSED and no global-resource conflict: revert any existing
-        # persistent intervention for this layer to make room for the new one.
+        # Safety PASSED and no global-resource conflict.
+        # Stage the existing persistent intervention (if any) for atomic
+        # revert-then-apply inside apply_intervention(). The revert is NOT done
+        # here — propose_intervention() is the validation phase and must not
+        # touch the model for the replacement case. If apply_intervention()
+        # subsequently raises, it restores the entry to _persistent_interventions
+        # so the model is never left with no active intervention at all.
         if not isinstance(action, NoOpAction):
             if action.layer_name in self._persistent_interventions:
-                old_action, old_step = self._persistent_interventions.pop(
+                staged_action, staged_step = self._persistent_interventions.pop(
                     action.layer_name
                 )
-                old_action.revert(self.model)
+                self._pending_reverts[action.layer_name] = (staged_action, staged_step)
+                # Log the intent here so callers and tests can observe it at
+                # proposal time. The actual model.revert() call happens inside
+                # apply_intervention() for atomicity.
                 logger.info(
-                    "[MoEWatch] InterventionEngine: reverted persistent %s "
-                    "(applied step %d) on layer '%s' to make way for new "
-                    "intervention (safety check already passed).",
-                    old_action.log(),
-                    old_step,
+                    "[MoEWatch] InterventionEngine: staged revert of persistent %s "
+                    "(applied step %d) on layer '%s'; revert executes in "
+                    "apply_intervention() for atomicity.",
+                    staged_action.log(),
+                    staged_step,
                     action.layer_name,
                 )
                 self._intervention_log.append(
@@ -324,8 +340,8 @@ class InterventionEngine:
                         "event": "persistent_reverted",
                         "step": step,
                         "layer": action.layer_name,
-                        "reverted_action": old_action.action_type,
-                        "reverted_applied_step": old_step,
+                        "reverted_action": staged_action.action_type,
+                        "reverted_applied_step": staged_step,
                     }
                 )
 
@@ -386,7 +402,41 @@ class InterventionEngine:
           ``(step, step + config.reward_window_steps)`` is recorded in
           :attr:`_observation_windows`.
         """
-        action.apply(self.model)
+        # Atomic replacement: if propose_intervention staged an old persistent
+        # action for this layer (because safety passed and we're replacing it),
+        # revert it and apply the new one in a single block. If action.apply()
+        # raises, the old persistent action is restored to _persistent_interventions
+        # so the engine's state stays consistent and the model is not left with
+        # no active intervention.
+        pending = self._pending_reverts.pop(action.layer_name, None)
+        if pending is not None:
+            old_action, old_step = pending
+            old_action.revert(self.model)
+            try:
+                action.apply(self.model)
+            except Exception:
+                # New action failed — restore old persistent state so the model
+                # is not left orphaned with no intervention installed.
+                self._persistent_interventions[action.layer_name] = (old_action, old_step)
+                logger.warning(
+                    "[MoEWatch] InterventionEngine: apply_intervention raised "
+                    "while replacing persistent %s on layer '%s'; "
+                    "old intervention restored to _persistent_interventions.",
+                    old_action.log(),
+                    action.layer_name,
+                )
+                raise
+            self._intervention_log.append(
+                {
+                    "event": "persistent_reverted",
+                    "step": step,
+                    "layer": action.layer_name,
+                    "reverted_action": old_action.action_type,
+                    "reverted_applied_step": old_step,
+                }
+            )
+        else:
+            action.apply(self.model)
 
         self._intervention_log.append(
             {
