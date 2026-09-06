@@ -85,15 +85,24 @@ class RoutingEvent:
         analysis); shape is typically ``[batch_size * seq_len, n_experts]``
         or ``[batch_size, seq_len, n_experts]``.
     selected_experts : torch.Tensor
-        Per-expert token counts — shape ``[n_experts]``, dtype ``int64``.
-        Stores how many tokens were routed to each expert in this forward
-        pass, replacing the previous flat index tensor of shape
-        ``[batch_size * seq_len * top_k]``.
+        Expert selection data. Interpretation depends on ``is_expert_counts``:
 
-        Memory comparison (Mixtral, seq=2048, top_k=2, n_experts=8):
-          Old (flat indices) : 2048 × 2 × 8 bytes = 32 KB / event
-          New (expert counts): 8 × 8 bytes         =  64 B / event
-          Savings            : ~500× per event → ~1 GB → ~2 MB for 32 layers
+        ``is_expert_counts=True`` (produced by RouterForwardHook v0.2+):
+            Shape ``[n_experts]``, dtype ``int64``.
+            Per-expert token counts — ``selected_experts[i]`` is the number
+            of tokens routed to expert ``i`` in this forward pass.
+            Memory: 64 B / event (Mixtral, n_experts=8).
+
+        ``is_expert_counts=False`` (legacy / external callers):
+            Shape ``[batch_size * seq_len * top_k]`` or ``[batch_size, top_k]``,
+            dtype ``int64``.
+            Flat expert index tensor produced by ``topk`` — each element is
+            an expert index in ``[0, n_experts)``.
+            Memory: up to 32 KB / event (Mixtral, seq=2048, top_k=2).
+    is_expert_counts : bool
+        Unambiguous format tag. ``True`` when ``selected_experts`` holds
+        per-expert token counts; ``False`` (default) when it holds raw
+        expert indices. Always set explicitly by ``RouterForwardHook``.
     expert_count : int
         Number of experts ``n_experts``, inferred from the last dimension
         of ``routing_logits``.
@@ -106,9 +115,12 @@ class RoutingEvent:
     global_step: int
     layer_name: str
     routing_logits: torch.Tensor
-    selected_experts: torch.Tensor   # shape: [n_experts] — per-expert token COUNTS
+    selected_experts: torch.Tensor
     expert_count: int
     batch_size: int
+    is_expert_counts: bool = False
+    # is_expert_counts=True  → selected_experts is shape [n_experts] per-expert token COUNTS
+    # is_expert_counts=False → selected_experts is flat/2-D expert INDEX tensor (legacy format)
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +305,7 @@ class RouterForwardHook:
                     selected_experts=expert_counts_cpu,     # [n_experts] counts, CPU
                     expert_count=int(expert_count),
                     batch_size=int(batch_size),
+                    is_expert_counts=True,                  # explicit format tag
                 )
 
             self.stat_collector.write_routing_event(event)
