@@ -23,7 +23,9 @@
 #                      (``config.reward_window_steps`` steps).
 #                   5. Once the window expires, computes a counterfactual
 #                      reward via BaselineTracker, reverts the action if the
-#                      reward is non-positive, and feeds the
+#                      reward is negative (a reward of exactly zero is
+#                      treated as neutral and the action is kept), and
+#                      feeds the
 #                      ``(state, action, reward)`` tuple back to the active
 #                      policy via :meth:`PolicyBase.update`.
 #
@@ -90,7 +92,8 @@ class InterventionEngine:
        window, and schedule an observation window.
     3. :meth:`check_observation_windows` — called every step; for each
        expired observation window, compute the counterfactual reward,
-       revert on non-positive reward, and update the policy.
+       revert on negative reward (zero counts as neutral, not reverted),
+       and update the policy.
 
     Parameters
     ----------

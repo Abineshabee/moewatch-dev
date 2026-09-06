@@ -490,12 +490,27 @@ class AuxLossAction(InterventionAction):
         if config is None:
             return
 
-        setattr(config, self._coef_attr, self._original_coef)
+        # Subtract this action's own delta from whatever value is CURRENTLY
+        # on the config, rather than resetting to the absolute snapshot
+        # captured in apply(). This is a global-resource action
+        # (is_global_resource=True), so another action's apply() may have
+        # accumulated its own delta on top after this one was applied (see
+        # InterventionEngine's global-conflict accumulation path). Resetting
+        # to the pre-apply absolute value would silently wipe out that other
+        # action's contribution; subtracting only our own delta leaves it
+        # intact. When no other action has touched the coefficient, this is
+        # numerically equivalent to restoring the original value.
+        current = float(getattr(config, self._coef_attr))
+        new_value = current - self.delta
+        setattr(config, self._coef_attr, new_value)
 
         logger.info(
-            "[MoEWatch] AuxLossAction: restored '%s' to %.6f (layer='%s').",
+            "[MoEWatch] AuxLossAction: restored '%s' from %.6f to %.6f "
+            "(subtracted own delta=%.6f, layer='%s').",
             self._coef_attr,
-            self._original_coef,
+            current,
+            new_value,
+            self.delta,
             self.layer_name,
         )
 

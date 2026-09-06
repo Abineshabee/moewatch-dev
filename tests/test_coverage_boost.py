@@ -776,6 +776,44 @@ class TestAuxLossAction:
         action.apply(model)  # second call should be a no-op
         assert model.config.aux_loss_coef == pytest.approx(0.06)
 
+    def test_revert_does_not_erase_stacked_second_action(self) -> None:
+        """Regression: when two AuxLossAction instances accumulate onto the
+        same shared config attribute (as InterventionEngine's global-resource
+        accumulation path does), reverting the FIRST action must not wipe
+        out the SECOND action's still-active contribution.
+
+        Before the fix, revert() reset the attribute to the absolute value
+        captured before apply() ran, which silently erased any delta added
+        by another action afterwards. Now revert() subtracts only its own
+        delta, so other accumulated contributions survive.
+        """
+        model = _FakeModelWithAuxCoef()
+        model.config = _ConfigObj(aux_loss_coef=0.01)
+
+        action_a = AuxLossAction(layer_name="layers.0.gate", delta=0.02)
+        action_b = AuxLossAction(layer_name="layers.1.gate", delta=0.03)
+
+        action_a.apply(model)
+        assert model.config.aux_loss_coef == pytest.approx(0.03)
+
+        # action_b accumulates on top, as InterventionEngine's global
+        # conflict-accumulation path does.
+        action_b.apply(model)
+        assert model.config.aux_loss_coef == pytest.approx(0.06)
+
+        # Reverting action_a (e.g. because its observation window resolved
+        # with a negative reward) must leave action_b's +0.03 intact.
+        action_a.revert(model)
+        assert model.config.aux_loss_coef == pytest.approx(0.04), (
+            "Reverting the first accumulated action must only remove its "
+            "own delta, not the second action's still-active contribution."
+        )
+
+        # And reverting action_b afterwards brings it back to the true
+        # original baseline.
+        action_b.revert(model)
+        assert model.config.aux_loss_coef == pytest.approx(0.01)
+
     def test_apply_with_router_aux_loss_coef_attr(self) -> None:
         model = _FakeModelWithAuxCoef()
         model.config = _ConfigObj(router_aux_loss_coef=0.02)
