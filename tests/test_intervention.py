@@ -994,3 +994,56 @@ class TestSuccessfulInterventionLifecycle:
             "Engine must log a 'persistent_reverted' event when it clears "
             "a persistent intervention to make way for a new one."
         )
+
+    # ------------------------------------------------------------------
+    # Regression: failed replacement must reinstall the old action on
+    # the model itself, not just restore the bookkeeping dict entry.
+    # ------------------------------------------------------------------
+
+    def test_failed_replacement_reinstalls_old_action_on_model(self) -> None:
+        """If the new action's apply() raises during a persistent-action
+        replacement, the OLD action must be re-applied to the model (its
+        hook reinstalled), not merely re-added to _persistent_interventions.
+
+        Before the fix, apply_intervention() reverted the old action from
+        the model, then on the new action's failure only restored the
+        dictionary entry — leaving the model with zero hooks while the
+        engine's bookkeeping claimed the old action was still active. That
+        mismatch between model state and engine state was the critical bug.
+        """
+        from unittest.mock import MagicMock
+        from moewatch.intervention.actions import RouterNoiseAction
+
+        engine, model, layer = self._make_engine()
+        policy = MagicMock()
+
+        # Cycle 1 → success, old action becomes persistent (1 hook installed).
+        old_action = RouterNoiseAction(layer_name=layer, noise_scale=0.05)
+        v1 = engine.propose_intervention(old_action, 1.0, {layer: 0.9}, [layer], step=0)
+        engine.apply_intervention(v1, step=0)
+        engine.check_observation_windows(step=10, risk_scores={layer: 0.4}, policy=policy)
+
+        assert layer in engine._persistent_interventions
+        assert len(model.router._forward_hooks) == 1
+
+        # Cycle 2 → propose a replacement, then make its apply() blow up.
+        new_action = RouterNoiseAction(layer_name=layer, noise_scale=0.05)
+        staged = engine.propose_intervention(new_action, 0.8, {layer: 0.4}, [layer], step=11)
+        assert layer not in engine._persistent_interventions  # staged for revert
+
+        staged.apply = MagicMock(side_effect=RuntimeError("boom"))
+
+        with pytest.raises(RuntimeError, match="boom"):
+            engine.apply_intervention(staged, step=11)
+
+        # The old action must be reinstalled on the MODEL itself...
+        assert len(model.router._forward_hooks) == 1, (
+            "After a failed replacement, the model must have the old "
+            "action's hook reinstalled, not zero hooks."
+        )
+        # ...and the engine's bookkeeping must agree with the model.
+        assert layer in engine._persistent_interventions, (
+            "Old action must be restored to _persistent_interventions."
+        )
+        restored_action, _ = engine._persistent_interventions[layer]
+        assert restored_action is old_action

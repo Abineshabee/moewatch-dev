@@ -414,18 +414,42 @@ class InterventionEngine:
             old_action.revert(self.model)
             try:
                 action.apply(self.model)
-            except Exception:
-                # New action failed — restore old persistent state so the model
-                # is not left orphaned with no intervention installed.
+            except Exception as apply_error:
+                # New action failed — the old action was already reverted from
+                # the model above, so at this point the model has NO
+                # intervention installed on this layer. Restoring only the
+                # bookkeeping dict (_persistent_interventions) is not enough:
+                # the model and the engine's records would disagree about
+                # what's actually installed. Re-apply the old action to the
+                # model itself so state and model stay consistent, then
+                # restore the bookkeeping entry to match.
+                try:
+                    old_action.apply(self.model)
+                except Exception as restore_error:
+                    logger.critical(
+                        "[MoEWatch] InterventionEngine: failed to restore old "
+                        "intervention %s on layer '%s' after replacement "
+                        "failure; model has NO intervention installed on "
+                        "this layer.",
+                        old_action.log(),
+                        action.layer_name,
+                    )
+                    raise RuntimeError(
+                        "Replacement of persistent intervention on layer "
+                        f"'{action.layer_name}' failed and the old "
+                        "intervention could not be restored to the model"
+                    ) from restore_error
+
                 self._persistent_interventions[action.layer_name] = (old_action, old_step)
                 logger.warning(
                     "[MoEWatch] InterventionEngine: apply_intervention raised "
                     "while replacing persistent %s on layer '%s'; "
-                    "old intervention restored to _persistent_interventions.",
+                    "old intervention re-applied to the model and restored "
+                    "to _persistent_interventions.",
                     old_action.log(),
                     action.layer_name,
                 )
-                raise
+                raise apply_error
             self._intervention_log.append(
                 {
                     "event": "persistent_reverted",
