@@ -240,29 +240,45 @@ class InterventionEngine:
                 downgraded.mark_applied(step)
                 return downgraded
 
+        # Run SafetyGuard FIRST — before any model mutations.
+        # Previously the global-resource accumulation block ran before this
+        # check, calling existing_action.apply() and action.apply() on the
+        # live model and then returning NoOp — bypassing SafetyGuard entirely
+        # for that code path. propose_intervention() is the *proposal* phase;
+        # all model mutations now happen only after safety validation passes.
+        result = self.safety_guard.check(action, current_loss, risk_scores, layer_order)
+
+        if not result.passed:
+            self._intervention_log.append(
+                {
+                    "event": "downgraded",
+                    "step": step,
+                    "layer": action.layer_name,
+                    "reason": "; ".join(result.failures),
+                    "original_action": action.action_type,
+                }
+            )
+            result.recommended_action.mark_applied(step)
+            # Safety rejected — persistent intervention (if any) is left
+            # completely untouched (earlier fix: revert only after safety
+            # passes). Return without mutating the model at all.
+            return result.recommended_action
+
+        # Safety PASSED. Now safe to perform model mutations.
+
         if not isinstance(action, NoOpAction) and action.is_global_resource:
             conflicting_layer = self._find_conflicting_global_intervention(action)
             if conflicting_layer is not None:
-                # A different layer already holds an active intervention on
-                # the same global resource (e.g. router_aux_loss_coef).
-                # Rather than dropping this proposal as a NoOp, accumulate
-                # it: apply the new delta on top of the value the existing
-                # action already set.  This is safe because:
-                #   - We do NOT register a second active intervention entry
-                #     for this layer — the existing one owns the revert.
-                #   - We record the accumulation in the log for auditability.
-                #   - The existing action's revert() will restore the coef to
-                #     its pre-first-apply value, which is correct — all
-                #     accumulated increases are unwound together.
+                # A different layer already holds an active or persistent
+                # intervention on the same global resource. Accumulate the
+                # new delta on top — safety has been confirmed above so it
+                # is correct to mutate the model here.
                 existing_action, _ = self._active_interventions.get(
                     conflicting_layer,
                     self._persistent_interventions.get(conflicting_layer, (None, None)),
                 )
                 if existing_action is not None:
                     existing_action.apply(self.model)  # idempotent on AuxLoss
-                # Force a fresh delta by bypassing the idempotency guard:
-                # directly call apply on the *new* action object (which has
-                # no _original_coef set yet) so its delta is added on top.
                 logger.info(
                     "[MoEWatch] InterventionEngine: '%s' on layer '%s' "
                     "accumulates onto existing '%s' intervention owned by "
@@ -283,42 +299,12 @@ class InterventionEngine:
                         "delta": action.delta,
                     }
                 )
-                # Return a NoOp so the engine does not register a second
-                # independent active-intervention entry for this layer —
-                # the existing entry on conflicting_layer owns lifecycle.
                 noop = NoOpAction(layer_name=action.layer_name)
                 noop.mark_applied(step)
                 return noop
 
-        result = self.safety_guard.check(action, current_loss, risk_scores, layer_order)
-
-        if not result.passed:
-            self._intervention_log.append(
-                {
-                    "event": "downgraded",
-                    "step": step,
-                    "layer": action.layer_name,
-                    "reason": "; ".join(result.failures),
-                    "original_action": action.action_type,
-                }
-            )
-            result.recommended_action.mark_applied(step)
-            # Safety guard rejected the new proposal — the persistent
-            # intervention (if any) must NOT be lost.  We deliberately have
-            # NOT reverted it yet; simply return the downgraded NoOp and
-            # leave the persistent entry untouched.
-            return result.recommended_action
-
-        # Safety guard PASSED.  Only NOW is it safe to revert any existing
-        # persistent intervention to make room for the new one.
-        #
-        # Doing the revert here (after the safety check) rather than before
-        # it fixes the lifecycle bug: a persistent intervention was previously
-        # popped and reverted before safety_guard.check() ran.  If the check
-        # then rejected the new proposal, the persistent action was gone and
-        # the model was left in a clean (un-intervened) state without any
-        # record of it — silently discarding a previously successful runtime
-        # intervention.
+        # Safety PASSED and no global-resource conflict: revert any existing
+        # persistent intervention for this layer to make room for the new one.
         if not isinstance(action, NoOpAction):
             if action.layer_name in self._persistent_interventions:
                 old_action, old_step = self._persistent_interventions.pop(
