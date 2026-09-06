@@ -525,9 +525,10 @@ class InterventionEngine:
            baseline trajectory would predict (the intervention helped); a
            *negative* reward means risk is at or above the baseline
            projection (the intervention did not help, or risk worsened).
-        3. If ``reward <= 0.0``: the action is reverted via
+        3. If ``reward < 0.0``: the action is reverted via
            :meth:`InterventionAction.revert`, and the outcome is logged as
-           ``"failure"``.
+           ``"failure"``. ``reward == 0.0`` is the neutral/invalid-baseline
+           case (step 1) and does **not** trigger a revert.
         4. If ``reward > 0.0``: the action is left in place, and the
            outcome is logged as ``"success"``.
         5. If a pending :class:`~moewatch.policy.base.PolicyState` was
@@ -564,7 +565,11 @@ class InterventionEngine:
 
             reward = self._compute_reward(layer_name, actual_risk)
 
-            if reward <= 0.0:
+            if reward < 0.0:
+                # Genuine negative reward: intervention did not help (or worsened
+                # risk relative to the baseline projection). Revert the action.
+                # reward == 0.0 means the baseline was not yet valid (neutral) —
+                # the action is left in place per the documented contract.
                 action.revert(self.model)
                 outcome = "failure"
                 logger.info(
