@@ -277,6 +277,84 @@ class TestModelUnchanged:
             p.requires_grad_(True)
 
 
+class TestWithBackwardConfigPrecedence:
+    """Regression tests for config.audit_with_backward being silently ignored.
+
+    audit()'s ``with_backward`` parameter must default to ``None`` so that
+    ``config.audit_with_backward`` is actually consulted when the caller
+    does not pass ``with_backward`` explicitly. A hardcoded ``True`` default
+    makes the config field unreachable in normal usage (see WatchConfig's
+    docstring for ``audit_with_backward``, which documents this exact
+    fallback contract).
+    """
+
+    def test_config_false_and_no_explicit_arg_skips_backward(
+        self, small_moe_model: FakeMoEModel
+    ) -> None:
+        calls = {"n": 0}
+        original_backward = torch.Tensor.backward
+
+        def spy(self, *args, **kwargs):
+            calls["n"] += 1
+            return original_backward(self, *args, **kwargs)
+
+        with patch.object(torch.Tensor, "backward", spy):
+            _run_audit(
+                small_moe_model,
+                hidden=small_moe_model.hidden,
+                config=_silent_config(audit_with_backward=False),
+            )
+
+        assert calls["n"] == 0, (
+            "config.audit_with_backward=False was ignored: backward() was "
+            "still called even though with_backward was not passed explicitly."
+        )
+
+    def test_explicit_arg_overrides_config(
+        self, small_moe_model: FakeMoEModel
+    ) -> None:
+        calls = {"n": 0}
+        original_backward = torch.Tensor.backward
+
+        def spy(self, *args, **kwargs):
+            calls["n"] += 1
+            return original_backward(self, *args, **kwargs)
+
+        dl = _make_dataloader(hidden=small_moe_model.hidden)
+        with patch.object(torch.Tensor, "backward", spy):
+            audit(
+                small_moe_model,
+                dl,
+                num_batches=2,
+                config=_silent_config(audit_with_backward=False),
+                device="cpu",
+                with_backward=True,
+            )
+
+        assert calls["n"] > 0, (
+            "Explicit with_backward=True must take precedence over "
+            "config.audit_with_backward=False."
+        )
+
+    def test_default_config_runs_backward(
+        self, small_moe_model: FakeMoEModel
+    ) -> None:
+        calls = {"n": 0}
+        original_backward = torch.Tensor.backward
+
+        def spy(self, *args, **kwargs):
+            calls["n"] += 1
+            return original_backward(self, *args, **kwargs)
+
+        with patch.object(torch.Tensor, "backward", spy):
+            _run_audit(small_moe_model, hidden=small_moe_model.hidden)
+
+        assert calls["n"] > 0, (
+            "Default config.audit_with_backward=True should run backward() "
+            "when with_backward is not passed explicitly."
+        )
+
+
 # ===========================================================================
 # ── 6. Error conditions ───────────────────────────────────────────────────────
 # ===========================================================================

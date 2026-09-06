@@ -81,7 +81,7 @@ def audit(
     num_batches: int = 100,
     config: Optional[WatchConfig] = None,
     device: str = "cpu",
-    with_backward: bool = True,
+    with_backward: Optional[bool] = None,
 ) -> "AuditReport":
     """Run offline diagnostic audit on a trained MoE model.
 
@@ -103,11 +103,14 @@ def audit(
     dataloader : torch.utils.data.DataLoader
         Validation dataloader. Batches are iterated up to ``num_batches``
         and fed through the model.
-    with_backward : bool, optional
-        If True (default), runs a proxy backward pass (sum-of-logits loss)
-        after each forward pass so that gradient hooks fire and Tier 1
+    with_backward : bool or None, optional
+        If True, runs a proxy backward pass (sum-of-logits loss) after
+        each forward pass so that gradient hooks fire and Tier 1
         (gradient starvation) analysis is populated. Set to False for
         routing-only audits where backward is too expensive or unavailable.
+        If None (default), falls back to ``config.audit_with_backward``
+        (itself ``True`` by default). Passing this argument explicitly
+        always takes precedence over the config field.
     num_batches : int, optional
         Maximum number of batches to process. Audit stops early if the
         dataloader is exhausted before this limit. Default: 100.
