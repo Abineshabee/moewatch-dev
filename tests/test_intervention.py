@@ -757,3 +757,240 @@ class TestRouterNoiseActionHookOrdering:
         )
 
         action.revert(model)
+
+# ===========================================================================
+# ── Regression: successful intervention lifecycle / hook stacking ───────────
+# ===========================================================================
+
+
+class TestSuccessfulInterventionLifecycle:
+    """Regression tests for the successful-intervention lifecycle bug.
+
+    Before the fix, when an observation window resolved with reward > 0,
+    ``check_observation_windows`` logged "success" and left the action's hook
+    installed in the model — but then popped the layer from
+    ``_active_interventions`` without moving the action anywhere.  The handle
+    was orphaned: the engine had no reference to it and could never remove it.
+
+    On the next intervention cycle for the same layer the engine saw no active
+    entry, allowed a new ``RouterNoiseAction``, and registered a second hook on
+    top of the first.  Repeated successful cycles therefore accumulated an
+    unbounded number of noise hooks on the same router module.
+
+    The fix moves a successful action into ``_persistent_interventions`` so the
+    handle is retained.  ``propose_intervention`` checks that dict and reverts
+    the old action before applying a new one, keeping hook count at exactly 1.
+    """
+
+    @staticmethod
+    def _make_engine(noise_scale=0.05):
+        """Return (engine, model, layer_name) ready for intervention tests."""
+        import torch
+        import torch.nn as nn
+        from moewatch.config import WatchConfig, OutputMode
+        from moewatch.collector.baseline_tracker import BaselineTracker
+        from moewatch.intervention.engine import InterventionEngine
+
+        class DeterministicRouter(nn.Module):
+            def forward(self, x):
+                return torch.tensor([[1.0, 0.0]])
+
+        class TinyMoE(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.router = DeterministicRouter()
+                self.top_k = 1
+
+            def forward(self, x):
+                return self.router(x)
+
+        model = TinyMoE()
+        config = WatchConfig(
+            output=OutputMode.SILENT,
+            reward_window_steps=10,
+            intervention_cooldown=0,
+            intervention_max_delta=1.0,  # allow any noise_scale in tests
+        )
+        bt = BaselineTracker(config)
+        # Stub baseline so reward is always positive (success path)
+        bt.is_baseline_valid = lambda l: True
+        bt.compute_counterfactual_delta = lambda l, r: -0.5  # → reward = +0.5
+        engine = InterventionEngine(config, model, bt)
+        return engine, model, "router"
+
+    # ------------------------------------------------------------------
+    # Core regression: no hook stacking across two successful cycles
+    # ------------------------------------------------------------------
+
+    def test_no_hook_stacking_across_successful_cycles(self) -> None:
+        """Two consecutive successful intervention cycles must leave exactly
+        one hook on the router — not two."""
+        from unittest.mock import MagicMock
+        from moewatch.intervention.actions import RouterNoiseAction
+
+        engine, model, layer = self._make_engine()
+        policy = MagicMock()
+
+        # Cycle 1
+        a1 = RouterNoiseAction(layer_name=layer, noise_scale=0.05)
+        v1 = engine.propose_intervention(a1, 1.0, {layer: 0.9}, [layer], step=0)
+        engine.apply_intervention(v1, step=0)
+        engine.check_observation_windows(step=10, risk_scores={layer: 0.4}, policy=policy)
+
+        hooks_after_cycle1 = len(model.router._forward_hooks)
+        assert hooks_after_cycle1 == 1, (
+            f"After cycle 1 success, expected 1 hook but got {hooks_after_cycle1}."
+        )
+
+        # Cycle 2
+        a2 = RouterNoiseAction(layer_name=layer, noise_scale=0.05)
+        v2 = engine.propose_intervention(a2, 0.8, {layer: 0.4}, [layer], step=11)
+        assert v2.action_type == "router_noise", (
+            "Second intervention should be allowed (persistent, not active)."
+        )
+        engine.apply_intervention(v2, step=11)
+
+        hooks_after_cycle2 = len(model.router._forward_hooks)
+        assert hooks_after_cycle2 == 1, (
+            f"After cycle 2, expected 1 hook (old reverted + new applied) "
+            f"but got {hooks_after_cycle2}. Hooks are stacking."
+        )
+
+    # ------------------------------------------------------------------
+    # Successful action is moved to _persistent_interventions
+    # ------------------------------------------------------------------
+
+    def test_successful_action_moves_to_persistent(self) -> None:
+        """On success, the action must appear in _persistent_interventions,
+        not remain in _active_interventions."""
+        from unittest.mock import MagicMock
+        from moewatch.intervention.actions import RouterNoiseAction
+
+        engine, model, layer = self._make_engine()
+        policy = MagicMock()
+
+        a = RouterNoiseAction(layer_name=layer, noise_scale=0.05)
+        v = engine.propose_intervention(a, 1.0, {layer: 0.9}, [layer], step=0)
+        engine.apply_intervention(v, step=0)
+        engine.check_observation_windows(step=10, risk_scores={layer: 0.4}, policy=policy)
+
+        assert layer not in engine._active_interventions, (
+            "Layer should be cleared from _active_interventions after window resolves."
+        )
+        assert layer in engine._persistent_interventions, (
+            "Successful action should be moved to _persistent_interventions."
+        )
+
+    # ------------------------------------------------------------------
+    # Failed action does NOT go to _persistent_interventions
+    # ------------------------------------------------------------------
+
+    def test_failed_action_not_in_persistent(self) -> None:
+        """On failure (reward <= 0), the action is reverted and must NOT
+        appear in _persistent_interventions."""
+        from unittest.mock import MagicMock
+        from moewatch.collector.baseline_tracker import BaselineTracker
+        from moewatch.config import WatchConfig, OutputMode
+        from moewatch.intervention.engine import InterventionEngine
+        from moewatch.intervention.actions import RouterNoiseAction
+        import torch
+        import torch.nn as nn
+
+        class Router(nn.Module):
+            def forward(self, x):
+                return torch.tensor([[1.0, 0.0]])
+
+        class Model(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.router = Router()
+                self.top_k = 1
+            def forward(self, x):
+                return self.router(x)
+
+        model = Model()
+        config = WatchConfig(
+            output=OutputMode.SILENT,
+            reward_window_steps=10,
+            intervention_cooldown=0,
+            intervention_max_delta=1.0,
+        )
+        bt = BaselineTracker(config)
+        bt.is_baseline_valid = lambda l: True
+        bt.compute_counterfactual_delta = lambda l, r: 0.5  # → reward = -0.5 (failure)
+
+        engine = InterventionEngine(config, model, bt)
+        layer = "router"
+        policy = MagicMock()
+
+        a = RouterNoiseAction(layer_name=layer, noise_scale=0.05)
+        v = engine.propose_intervention(a, 1.0, {layer: 0.9}, [layer], step=0)
+        engine.apply_intervention(v, step=0)
+        engine.check_observation_windows(step=10, risk_scores={layer: 0.9}, policy=policy)
+
+        assert layer not in engine._active_interventions
+        assert layer not in engine._persistent_interventions, (
+            "Failed interventions must not appear in _persistent_interventions."
+        )
+        # Hook must also be gone
+        assert len(model.router._forward_hooks) == 0, (
+            "Failed intervention hook must be removed by revert()."
+        )
+
+    # ------------------------------------------------------------------
+    # has_active_intervention covers persistent dict
+    # ------------------------------------------------------------------
+
+    def test_has_active_intervention_includes_persistent(self) -> None:
+        """has_active_intervention() must return True for persistent layers."""
+        from unittest.mock import MagicMock
+        from moewatch.intervention.actions import RouterNoiseAction
+
+        engine, model, layer = self._make_engine()
+        policy = MagicMock()
+
+        a = RouterNoiseAction(layer_name=layer, noise_scale=0.05)
+        v = engine.propose_intervention(a, 1.0, {layer: 0.9}, [layer], step=0)
+        engine.apply_intervention(v, step=0)
+
+        assert engine.has_active_intervention(layer)  # in _active_interventions
+        engine.check_observation_windows(step=10, risk_scores={layer: 0.4}, policy=policy)
+        assert engine.has_active_intervention(layer)  # now in _persistent_interventions
+
+    # ------------------------------------------------------------------
+    # Persistent action is reverted when new intervention arrives
+    # ------------------------------------------------------------------
+
+    def test_persistent_action_reverted_before_new_intervention(self) -> None:
+        """When a new intervention targets a layer with a persistent action,
+        the persistent action must be reverted before the new one is applied."""
+        from unittest.mock import MagicMock
+        from moewatch.intervention.actions import RouterNoiseAction
+
+        engine, model, layer = self._make_engine()
+        policy = MagicMock()
+
+        # Cycle 1 → success
+        a1 = RouterNoiseAction(layer_name=layer, noise_scale=0.05)
+        v1 = engine.propose_intervention(a1, 1.0, {layer: 0.9}, [layer], step=0)
+        engine.apply_intervention(v1, step=0)
+        engine.check_observation_windows(step=10, risk_scores={layer: 0.4}, policy=policy)
+
+        assert layer in engine._persistent_interventions
+
+        # Cycle 2 → propose triggers revert of persistent action
+        a2 = RouterNoiseAction(layer_name=layer, noise_scale=0.05)
+        engine.propose_intervention(a2, 0.8, {layer: 0.4}, [layer], step=11)
+
+        # Persistent entry must be cleared by propose
+        assert layer not in engine._persistent_interventions, (
+            "propose_intervention must clear the persistent entry when accepting "
+            "a new intervention for the same layer."
+        )
+
+        # Log must record the persistent_reverted event
+        events = [e["event"] for e in engine._intervention_log]
+        assert "persistent_reverted" in events, (
+            "Engine must log a 'persistent_reverted' event when it clears "
+            "a persistent intervention to make way for a new one."
+        )

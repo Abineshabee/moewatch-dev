@@ -131,6 +131,16 @@ class InterventionEngine:
         # intervention per layer.
         self._active_interventions: Dict[str, Tuple[InterventionAction, int]] = {}
 
+        # layer_name -> (action, applied_step). Interventions that completed
+        # their observation window with reward > 0 and were intentionally
+        # kept in the model. The engine retains the action object so it can
+        # revert the hook/change when the same layer is intervened on again.
+        # Without this dict the action handle is orphaned after a successful
+        # window: the hook stays installed in the model forever while the
+        # engine forgets it existed, breaking the "at most one intervention
+        # per layer" invariant and stacking hooks on every new cycle.
+        self._persistent_interventions: Dict[str, Tuple[InterventionAction, int]] = {}
+
         # layer_name -> (start_step, end_step) observation window.
         self._observation_windows: Dict[str, Tuple[int, int]] = {}
 
@@ -207,28 +217,54 @@ class InterventionEngine:
         """
         action.mark_applied(step)
 
-        if (
-            not isinstance(action, NoOpAction)
-            and action.layer_name in self._active_interventions
-        ):
-            logger.info(
-                "[MoEWatch] InterventionEngine: layer '%s' already has an "
-                "active intervention; downgrading %s to NoOp.",
-                action.layer_name,
-                action.log(),
-            )
-            self._intervention_log.append(
-                {
-                    "event": "downgraded",
-                    "step": step,
-                    "layer": action.layer_name,
-                    "reason": "layer already has an active intervention",
-                    "original_action": action.action_type,
-                }
-            )
-            downgraded = NoOpAction(layer_name=action.layer_name)
-            downgraded.mark_applied(step)
-            return downgraded
+        if not isinstance(action, NoOpAction):
+            # A layer under active observation cannot accept a second
+            # intervention — block it and let the current window expire first.
+            if action.layer_name in self._active_interventions:
+                logger.info(
+                    "[MoEWatch] InterventionEngine: layer '%s' already has an "
+                    "active intervention; downgrading %s to NoOp.",
+                    action.layer_name,
+                    action.log(),
+                )
+                self._intervention_log.append(
+                    {
+                        "event": "downgraded",
+                        "step": step,
+                        "layer": action.layer_name,
+                        "reason": "layer already has an active intervention",
+                        "original_action": action.action_type,
+                    }
+                )
+                downgraded = NoOpAction(layer_name=action.layer_name)
+                downgraded.mark_applied(step)
+                return downgraded
+
+            # A previously successful intervention is still installed in the
+            # model. Revert it now so the new action starts from a clean
+            # baseline and hooks do not accumulate.
+            if action.layer_name in self._persistent_interventions:
+                old_action, old_step = self._persistent_interventions.pop(
+                    action.layer_name
+                )
+                old_action.revert(self.model)
+                logger.info(
+                    "[MoEWatch] InterventionEngine: reverted persistent %s "
+                    "(applied step %d) on layer '%s' to make way for new "
+                    "intervention.",
+                    old_action.log(),
+                    old_step,
+                    action.layer_name,
+                )
+                self._intervention_log.append(
+                    {
+                        "event": "persistent_reverted",
+                        "step": step,
+                        "layer": action.layer_name,
+                        "reverted_action": old_action.action_type,
+                        "reverted_applied_step": old_step,
+                    }
+                )
 
         if not isinstance(action, NoOpAction) and action.is_global_resource:
             conflicting_layer = self._find_conflicting_global_intervention(action)
@@ -488,9 +524,14 @@ class InterventionEngine:
                 )
             else:
                 outcome = "success"
+                # Keep the action in the model but transfer ownership to
+                # _persistent_interventions so the handle is never orphaned.
+                # propose_intervention checks both dicts, preserving the
+                # "at most one intervention per layer" invariant across cycles.
+                self._persistent_interventions[layer_name] = (action, applied_step)
                 logger.info(
                     "[MoEWatch] InterventionEngine: %s at step %d "
-                    "(applied step %d) -> reward=%.6f; kept.",
+                    "(applied step %d) -> reward=%.6f; kept (persistent).",
                     action.log(),
                     step,
                     applied_step,
@@ -606,6 +647,11 @@ class InterventionEngine:
     def has_active_intervention(self, layer_name: str) -> bool:
         """Check whether ``layer_name`` currently has an active intervention.
 
+        Returns ``True`` for layers under observation
+        (:attr:`_active_interventions`) **and** for layers whose previous
+        intervention succeeded and is still installed in the model
+        (:attr:`_persistent_interventions`).
+
         Parameters
         ----------
         layer_name : str
@@ -614,14 +660,18 @@ class InterventionEngine:
         Returns
         -------
         bool
-            ``True`` if ``layer_name`` is present in
-            :attr:`_active_interventions`.
+            ``True`` if ``layer_name`` is present in either
+            :attr:`_active_interventions` or :attr:`_persistent_interventions`.
         """
-        return layer_name in self._active_interventions
+        return (
+            layer_name in self._active_interventions
+            or layer_name in self._persistent_interventions
+        )
 
     def __repr__(self) -> str:
         return (
             f"InterventionEngine(active={len(self._active_interventions)}, "
+            f"persistent={len(self._persistent_interventions)}, "
             f"pending_windows={len(self._observation_windows)}, "
             f"log_entries={len(self._intervention_log)})"
         )
