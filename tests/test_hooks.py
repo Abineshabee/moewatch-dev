@@ -43,7 +43,7 @@ from moewatch.config import OutputMode, WatchConfig
 from moewatch.hooks.manager import HookManager
 from moewatch.hooks.router_hook import RouterForwardHook, RoutingEvent
 
-from conftest import FakeMoEModel, FakeNonMoEModel
+from conftest import FakeModernMoEModel, FakeMoEModel, FakeNonMoEModel
 
 
 # ===========================================================================
@@ -209,6 +209,78 @@ class TestAttach:
         routing_keys = list(all_stats.get("routing", {}).keys())
         assert len(routing_keys) == 2, (
             f"Expected 2 routing layers registered, got: {routing_keys}"
+        )
+        manager.detach()
+
+
+class TestModernRouterArchitecture:
+    """End-to-end regression coverage for the raw-nn.Parameter "TopKRouter"
+    layout used by current transformers (>=4.57) Mixtral / Qwen3-MoE /
+    DeepSeek-V3 / OLMoE implementations (see ``FakeModernTopKRouter`` /
+    ``FakeModernMoEModel`` in conftest.py).
+
+    Before the fix, ``attach()`` raised "no MoE router modules detected"
+    for this architecture outright (auto-detection rejected any gate
+    lacking ``out_features``). Even bypassing that with a manual
+    ``config.router_modules`` override, ``_infer_expert_count()`` still
+    fell back to a hardcoded ``2``, silently registering far too few
+    experts with ``StatCollector`` and permanently clamping every real
+    per-token expert index into that too-small range — corrupting
+    utilization statistics without raising anything at all.
+    """
+
+    def test_attach_detects_modern_router(
+        self, stat_collector: StatCollector, default_config: WatchConfig
+    ) -> None:
+        """Auto-detection must find the router without config.router_modules."""
+        model = FakeModernMoEModel(n_layers=1, n_experts=8, hidden=16)
+        manager = HookManager(model, stat_collector, default_config)
+        manager.attach()
+
+        assert len(manager.get_layer_map()) == 1
+        manager.detach()
+
+    def test_attach_registers_full_expert_count(
+        self, stat_collector: StatCollector, default_config: WatchConfig
+    ) -> None:
+        """The registered expert count must match num_experts (8), not the
+        hardcoded fallback of 2 that this bug used to silently apply."""
+        model = FakeModernMoEModel(n_layers=1, n_experts=8, hidden=16)
+        manager = HookManager(model, stat_collector, default_config)
+        manager.attach()
+
+        (layer_name,) = manager.get_layer_map().keys()
+        assert stat_collector._expert_counts[layer_name] == 8
+        manager.detach()
+
+    def test_routing_stats_not_clamped_into_two_experts(
+        self, stat_collector: StatCollector, default_config: WatchConfig
+    ) -> None:
+        """Full pipeline: forward passes through a healthy, uniformly
+        routed 8-expert modern-router model must produce utilization
+        spread across all 8 experts, not collapsed into 2 phantom
+        buckets by index clamping."""
+        torch.manual_seed(0)
+        model = FakeModernMoEModel(n_layers=1, n_experts=8, hidden=16)
+        manager = HookManager(model, stat_collector, default_config)
+        manager.attach()
+
+        x = torch.randn(64, 16)
+        for step in range(5):
+            manager.set_global_step(step)
+            model(x)
+
+        (layer_name,) = manager.get_layer_map().keys()
+        stats = stat_collector.get_all_stats()["routing"][layer_name]
+
+        assert stats.expert_token_counts.numel() == 8
+        # Every expert must have received a nonzero share of tokens —
+        # a near-uniform random gate over 8 experts should not leave
+        # experts 2..7 completely empty (which is what the clamp bug
+        # would do, since every index was folded into {0, 1}).
+        assert (stats.expert_token_counts > 0).all(), (
+            f"expected nonzero tokens for all 8 experts, got "
+            f"{stats.expert_token_counts.tolist()}"
         )
         manager.detach()
 

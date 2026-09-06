@@ -479,23 +479,67 @@ class HookManager:
     def _infer_expert_count(self, router_module: nn.Module) -> int:
         """Infer the number of experts from a router module's shape.
 
+        Checked in order:
+
+        1. A ``num_experts`` integer attribute — present directly on the
+           modern "TopKRouter" gate classes used by current Mixtral,
+           Qwen3-MoE, DeepSeek-V3, and OLMoE implementations (e.g.
+           ``Qwen3MoeTopKRouter.num_experts``), and the most direct
+           signal available when present.
+        2. ``out_features`` — for ``nn.Linear``-based gates (legacy
+           Mixtral, custom architectures).
+        3. ``weight.shape[0]`` — for the same modern "TopKRouter"
+           classes when ``num_experts`` isn't exposed under that name;
+           these store their projection as a raw
+           ``nn.Parameter(torch.zeros(num_experts, hidden_dim))``
+           rather than wrapping it in ``nn.Linear``, so it has no
+           ``out_features`` but ``weight.shape[0]`` is the expert count
+           (mirrors ``nn.Linear.weight``'s own
+           ``[out_features, in_features]`` layout).
+
+        Getting this wrong is not merely cosmetic: the returned value is
+        used to pre-register this layer's expert-count with
+        :class:`~moewatch.collector.stat_collector.StatCollector`
+        *before* any forward pass occurs. ``StatCollector`` only trusts
+        that count on a layer's *very first* registration — by the time
+        the first real ``RoutingEvent`` arrives, the layer is already
+        registered, so a wrong count here is never self-corrected. Every
+        subsequent per-token expert index is then clamped into that
+        (wrong, too-small) range before histogramming, silently folding
+        e.g. a real 128-expert model's routing decisions into 2 phantom
+        buckets and fabricating near-total "collapse" regardless of true
+        routing health. Falling back to ``2`` is intentionally a last
+        resort, not a normal case.
+
         Parameters
         ----------
         router_module : torch.nn.Module
-            Router module, expected to expose ``out_features`` for
-            ``nn.Linear``-based gates.
+            Router module to inspect.
 
         Returns
         -------
         int
-            ``out_features`` if present and ``>= 1``, otherwise ``2`` as
-            a conservative non-zero default (buffers sized this way are
-            harmless placeholders; real shapes are derived from the
-            first :class:`RoutingEvent`).
+            The inferred expert count from the first matching signal
+            above, otherwise ``2`` as a conservative non-zero default
+            (buffers sized this way are harmless placeholders; real
+            shapes are derived from the first :class:`RoutingEvent` —
+            for the layers where that self-correction path actually
+            applies, see the note above for why it usually doesn't).
         """
+        num_experts_attr = getattr(router_module, "num_experts", None)
+        if isinstance(num_experts_attr, int) and num_experts_attr >= 1:
+            return num_experts_attr
+
         out_features = getattr(router_module, "out_features", None)
         if isinstance(out_features, int) and out_features >= 1:
             return out_features
+
+        weight = getattr(router_module, "weight", None)
+        if isinstance(weight, torch.nn.Parameter) and weight.dim() == 2:
+            n_experts = int(weight.shape[0])
+            if n_experts >= 1:
+                return n_experts
+
         return 2
 
     def _find_expert_weight_parameters(

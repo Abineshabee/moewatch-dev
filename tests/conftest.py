@@ -198,6 +198,71 @@ class FakeModelWithManualRouter(nn.Module):
         return x
 
 
+class FakeModernTopKRouter(nn.Module):
+    """Mimics the current (transformers>=4.57) HuggingFace router layout
+    used by Mixtral, Qwen3-MoE, DeepSeek-V3, and OLMoE: the routing
+    projection is stored as a raw ``nn.Parameter`` (``self.weight``,
+    shape ``[num_experts, hidden_dim]``) rather than being wrapped in
+    ``nn.Linear``, so it has no ``out_features``/``in_features``. This is
+    the shape that regressed auto-detection (see
+    ``tests/test_detection.py``'s raw-weight-router tests and
+    ``tests/test_hooks.py``'s ``FakeModernMoEModel`` end-to-end test).
+    """
+
+    def __init__(self, hidden: int, n_experts: int, top_k: int = 2) -> None:
+        super().__init__()
+        self.num_experts = n_experts
+        self.top_k = top_k
+        self.hidden_dim = hidden
+        self.weight = nn.Parameter(torch.zeros(n_experts, hidden))
+        nn.init.normal_(self.weight, std=0.02)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.nn.functional.linear(x, self.weight)  # [batch, n_experts]
+
+
+class FakeModernMoEModel(nn.Module):
+    """Model using the modern raw-``nn.Parameter`` router layout
+    (``FakeModernTopKRouter``) paired with an ordinary ``nn.ModuleList``
+    of per-expert submodules, so gradient-hook attachment (which only
+    depends on the ``nn.ModuleList`` sibling, unaffected by this bug)
+    continues to work unchanged once the router itself is detected.
+    """
+
+    def __init__(
+        self,
+        n_layers: int = 1,
+        n_experts: int = 8,
+        hidden: int = 16,
+    ) -> None:
+        super().__init__()
+        self.n_experts = n_experts
+        self.hidden = hidden
+        self.layers = nn.ModuleList(
+            [_FakeModernMoEBlock(hidden, n_experts) for _ in range(n_layers)]
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        for layer in self.layers:
+            x = layer(x)
+        return x
+
+
+class _FakeModernMoEBlock(nn.Module):
+    def __init__(self, hidden: int, n_experts: int) -> None:
+        super().__init__()
+        self.gate = FakeModernTopKRouter(hidden, n_experts)
+        self.experts = nn.ModuleList(
+            [nn.Linear(hidden, hidden, bias=False) for _ in range(n_experts)]
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        logits = self.gate(x)
+        probs = torch.softmax(logits, dim=-1)
+        out = torch.stack([expert(x) for expert in self.experts], dim=-1)
+        return (out * probs.unsqueeze(1)).sum(-1)
+
+
 class FakeCollapsingMoEModel(nn.Module):
     """
     Model whose gate weight is frozen at near-zero except expert 0 —

@@ -338,8 +338,34 @@ def _looks_like_router(module: nn.Module) -> bool:
 
     A router/gating module is expected to be (or directly wrap) a linear
     projection from the model's hidden dimension to the number of
-    experts: ``out_features`` is the expert count and must be ``>= 2``
-    (a router must route to at least two experts to be meaningful).
+    experts, so the expert count (``>= 2``, a router must route to at
+    least two experts to be meaningful) can be read off its shape.
+
+    Two module layouts are recognised:
+
+    1. **``nn.Linear``-style** (legacy Mixtral, custom architectures):
+       the module exposes an integer ``out_features`` attribute — the
+       expert count — and, if present, an integer ``in_features >= 1``.
+    2. **Raw-``nn.Parameter`` "TopKRouter" style** (Mixtral, Qwen3-MoE,
+       DeepSeek-V3, and OLMoE as of transformers>=4.57): the gate is a
+       small custom ``nn.Module`` that stores its projection directly as
+       ``self.weight = nn.Parameter(torch.zeros(num_experts, hidden_dim))``
+       and applies it via ``F.linear(x, self.weight)`` in ``forward()``,
+       *without* wrapping it in ``nn.Linear`` — so it has no
+       ``out_features`` at all. Without this branch, ``_looks_like_router``
+       rejects every router in these (now current) HuggingFace
+       implementations, auto-detection finds nothing, and MoEWatch fails
+       outright with "no MoE router modules detected" for the very
+       architectures it advertises support for. This branch reads the
+       expert count from ``weight.shape[0]``, but — unlike the
+       ``nn.Linear`` branch — *requires* a corroborating ``num_experts``
+       integer attribute equal to that shape (all four architectures'
+       router classes expose one). A bare 2D ``.weight`` alone is too
+       weak a signal on its own: plenty of ordinary, non-router modules
+       matched by the name heuristics also carry one (e.g. an
+       ``nn.Embedding`` named ``"...gate_embedding"`` has a 2D
+       ``.weight`` of shape ``[num_tokens, dim]`` with no ``num_experts``
+       to corroborate it) and must not be misdetected as a router.
 
     Parameters
     ----------
@@ -349,10 +375,8 @@ def _looks_like_router(module: nn.Module) -> bool:
     Returns
     -------
     bool
-        ``True`` only if ``module`` exposes an integer ``out_features``
-        attribute with value ``>= 2`` (and, if present, an integer
-        ``in_features >= 1``). Modules lacking ``out_features``
-        entirely — including container modules such as
+        ``True`` if either layout above yields a plausible expert count.
+        Modules matching neither — including container modules such as
         ``nn.ModuleList`` holders for experts, or composite MoE blocks
         that do not themselves expose a flat linear shape — are rejected
         here. This keeps detection precise: containers and expert
@@ -360,12 +384,22 @@ def _looks_like_router(module: nn.Module) -> bool:
         their *name* happens to match a router pattern.
     """
     out_features = getattr(module, "out_features", None)
-    if not isinstance(out_features, int) or out_features < 2:
-        return False
+    if isinstance(out_features, int) and out_features >= 2:
+        in_features = getattr(module, "in_features", None)
+        if in_features is not None:
+            if not isinstance(in_features, int) or in_features < 1:
+                return False
+        return True
 
-    in_features = getattr(module, "in_features", None)
-    if in_features is not None:
-        if not isinstance(in_features, int) or in_features < 1:
-            return False
+    weight = getattr(module, "weight", None)
+    num_experts_attr = getattr(module, "num_experts", None)
+    if (
+        isinstance(weight, torch.nn.Parameter)
+        and weight.dim() == 2
+        and isinstance(num_experts_attr, int)
+        and num_experts_attr >= 2
+        and weight.shape[0] == num_experts_attr
+    ):
+        return True
 
-    return True
+    return False

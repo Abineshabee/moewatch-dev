@@ -353,6 +353,54 @@ class TestInternalHelpers:
         m = nn.ReLU()
         assert _looks_like_router(m) is False
 
+    # ── _looks_like_router: modern raw-nn.Parameter "TopKRouter" gates ──────
+    #
+    # Regression coverage for a real bug: current transformers (>=4.57)
+    # implements the router for Mixtral, Qwen3-MoE, DeepSeek-V3, and OLMoE
+    # as a small custom nn.Module storing its projection directly as
+    # `self.weight = nn.Parameter(torch.zeros(num_experts, hidden_dim))`
+    # rather than wrapping it in nn.Linear, so it has no `out_features`.
+    # Before this fix, `_looks_like_router` rejected every such router
+    # outright, auto-detection found nothing, and MoEWatch failed with
+    # "no MoE router modules detected" for every officially-supported
+    # architecture.
+
+    def test_looks_like_router_raw_weight_topk_router(self) -> None:
+        """A TopKRouter-style gate (raw nn.Parameter, no out_features)
+        with a matching num_experts attribute must be detected."""
+
+        class TopKRouter(nn.Module):
+            def __init__(self, hidden_dim: int, num_experts: int) -> None:
+                super().__init__()
+                self.num_experts = num_experts
+                self.hidden_dim = hidden_dim
+                self.weight = nn.Parameter(torch.zeros(num_experts, hidden_dim))
+
+        m = TopKRouter(hidden_dim=16, num_experts=128)
+        assert getattr(m, "out_features", None) is None
+        assert _looks_like_router(m) is True
+
+    def test_looks_like_router_raw_weight_requires_num_experts_match(self) -> None:
+        """A 2D `.weight` alone is not enough: num_experts must corroborate
+        it and match the leading dimension exactly, or detection must
+        reject the module rather than guess."""
+
+        class Suspicious(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.num_experts = 8
+                self.weight = nn.Parameter(torch.zeros(4, 16))  # mismatched
+
+        assert _looks_like_router(Suspicious()) is False
+
+    def test_looks_like_router_embedding_still_rejected(self) -> None:
+        """An nn.Embedding has a 2D `.weight` but no `num_experts`
+        attribute — the corroboration requirement must keep this a
+        false-positive guard even though the raw-weight branch exists."""
+        m = nn.Embedding(100, 32)
+        assert getattr(m, "num_experts", None) is None
+        assert _looks_like_router(m) is False
+
     # ── _auto_detect ────────────────────────────────────────────────────────
 
     def test_auto_detect_on_empty_model(self) -> None:
