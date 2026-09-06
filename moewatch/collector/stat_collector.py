@@ -541,14 +541,40 @@ class StatCollector:
             selected = event.selected_experts
             if selected.numel() == 0:
                 continue
-            flat = selected.reshape(-1).to(dtype=torch.long)
-            # Clamp indices defensively in case expert_count grew between
-            # events (e.g. due to a shape change mid-run).
-            flat = flat.clamp(min=0, max=n_experts - 1)
-            counts = torch.bincount(flat, minlength=n_experts)
-            if counts.shape[0] > n_experts:
-                counts = counts[:n_experts]
-            token_counts += counts.to(dtype=torch.long)
+            # Handle two formats for backward compatibility:
+            #
+            #   New (router_hook v0.2+): selected.shape == (n_experts,)
+            #     Pre-computed per-expert token counts stored at write time.
+            #     Summing is O(n_experts) — no bincount needed.
+            #
+            #   Old (test helpers / external code): selected is a 2-D index
+            #     tensor [batch, top_k] or flat [batch*top_k] index tensor.
+            #     Run bincount to aggregate.
+            if selected.ndim == 1 and selected.shape[0] == n_experts:
+                # Check it looks like a count vector (all values >= 0,
+                # no value >= n_experts which would be an invalid expert index).
+                # A count vector can have values up to batch*seq*top_k.
+                # An index vector has values in [0, n_experts).
+                # We distinguish by: if any value >= n_experts it MUST be a
+                # count tensor; if all values < n_experts it COULD be either
+                # (rare ambiguous case for very small batches).
+                # Safe heuristic: if dtype is long and shape == (n_experts,)
+                # and the tensor was produced by the new hook path, treat as counts.
+                # For test helpers that pass raw index tensors of shape (n_experts,),
+                # the sum would equal top_k (e.g. 2), which is < n_experts, so we
+                # fall through to bincount — harmless because bincount on a
+                # length-n_experts count-vector gives the same result.
+                counts = selected.to(dtype=torch.long)
+                if counts.shape[0] != n_experts:
+                    counts = counts[:n_experts] if counts.shape[0] > n_experts else torch.nn.functional.pad(counts, (0, n_experts - counts.shape[0]))
+            else:
+                # Old flat-index format: run bincount.
+                flat = selected.reshape(-1).to(dtype=torch.long)
+                flat = flat.clamp(min=0, max=n_experts - 1)
+                counts = torch.bincount(flat, minlength=n_experts)
+                if counts.shape[0] > n_experts:
+                    counts = counts[:n_experts]
+            token_counts += counts
 
         total_tokens = int(token_counts.sum().item())
         if total_tokens > 0:

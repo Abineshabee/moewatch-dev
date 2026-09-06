@@ -774,52 +774,41 @@ def _run_single_forward(
     object or None
         Model output when ``return_output`` is True, else None.
     """
-    try:
-        if isinstance(batch, dict):
-            output = model(**batch)
-        elif isinstance(batch, (list, tuple)):
-            # Many dataloaders return (input_tensor, label_tensor).
-            # Detect this BEFORE calling the model by checking whether
-            # the model's forward signature accepts multiple positional
-            # arguments. Doing the detection up-front avoids running a
-            # first forward pass that triggers all routing hooks, then
-            # running a second forward pass in the fallback — which would
-            # produce duplicate routing events and corrupt statistics.
-            import inspect
-            try:
-                sig = inspect.signature(model.forward)
-                n_positional = sum(
-                    1 for p in sig.parameters.values()
-                    if p.default is inspect.Parameter.empty
-                    and p.kind in (
-                        inspect.Parameter.POSITIONAL_ONLY,
-                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                    )
+    # Decide HOW to call the model before executing it.
+    # Signature inspection is done up-front so we never run the model
+    # twice. The outer try only catches non-TypeError exceptions that
+    # indicate genuine model failures (not input-convention mismatches).
+    import inspect
+    if isinstance(batch, dict):
+        call = lambda: model(**batch)                           # noqa: E731
+    elif isinstance(batch, (list, tuple)):
+        # Check how many positional args model.forward requires.
+        # If it can accept all elements of the tuple, pass them all.
+        # Otherwise treat as (input, label, ...) and pass only the first.
+        try:
+            sig = inspect.signature(model.forward)
+            n_positional = sum(
+                1 for p in sig.parameters.values()
+                if p.default is inspect.Parameter.empty
+                and p.kind in (
+                    inspect.Parameter.POSITIONAL_ONLY,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
                 )
-                if n_positional >= len(batch):
-                    output = model(*batch)
-                else:
-                    # Model takes fewer args than batch elements;
-                    # treat as (input, label...) and use first element only.
-                    output = model(batch[0])
-            except (TypeError, ValueError):
-                # Could not inspect signature; fall back to first element.
-                output = model(batch[0])
-        else:
-            output = model(batch)
+            )
+        except (ValueError, TypeError):
+            n_positional = 1  # cannot inspect — assume (input, label) convention
 
-    except TypeError as exc:
-        logger.debug(
-            "[MoEWatch] Forward pass call convention mismatch (%s). "
-            "Retrying with first element only (batch may be an (input, label) tuple).",
-            exc,
-        )
-        # Last-resort fallback — only reached for non-list/tuple batches
-        # with unexpected signatures. Note: this path CAN trigger a second
-        # forward pass for non-sequence batches, but that case is rare and
-        # the stat_collector deduplicates events by step, so impact is minimal.
-        first = batch[0] if isinstance(batch, (list, tuple)) else batch
-        output = model(first)
+        if n_positional >= len(batch):
+            call = lambda: model(*batch)                        # noqa: E731
+        else:
+            call = lambda: model(batch[0])                      # noqa: E731
+    else:
+        call = lambda: model(batch)                             # noqa: E731
+
+    # Execute exactly once. Any exception raised here is a real model
+    # error — we do NOT catch TypeError and retry, because that would
+    # fire all routing hooks a second time and corrupt audit statistics.
+    output = call()
 
     return output if return_output else None
 

@@ -182,34 +182,61 @@ def compute_entropy_norm(probs: np.ndarray, n_experts: int) -> float:
 
 
 def _softmax_to_probs(logits: torch.Tensor) -> np.ndarray:
-    """Convert router logits to a mean probability distribution over experts.
+    """Convert router logits OR pre-computed probabilities to a mean
+    probability distribution over experts.
 
-    Accepts logits of shape ``[..., n_experts]`` (any number of leading
-    batch / sequence dimensions) and:
-      1. Computes softmax along the last dimension.
-      2. Averages across all leading dimensions to obtain a single
-         per-expert mean probability vector of shape ``[n_experts]``.
+    Accepts tensors of shape ``[..., n_experts]`` (any number of leading
+    batch / sequence dimensions).
+
+    The ``router_hook`` stores a compact ``mean_probs`` vector (shape
+    ``[n_experts]``, values already softmaxed and averaged) in the
+    ``routing_logits`` field of :class:`~moewatch.hooks.router_hook.RoutingEvent`
+    to reduce memory usage.  When this function receives such a vector it
+    must NOT apply softmax again — doing so would distort the distribution
+    toward uniformity and produce incorrect (inflated) entropy values.
+
+    Detection rule:  a 1-D tensor whose values are all non-negative and
+    sum to approximately 1.0 is already a probability vector and is
+    returned as-is after averaging.  Any other shape, or a 1-D tensor that
+    does not satisfy the probability-vector criterion, is treated as raw
+    logits and passed through softmax first.
 
     Parameters
     ----------
     logits : torch.Tensor
-        Raw router logits.
+        Raw router logits **or** a pre-computed mean probability vector
+        (as stored by the compact router hook).
 
     Returns
     -------
     numpy.ndarray
         1-D float64 array of shape ``[n_experts]``.  Returns uniform
-        distribution if logits has no expert dimension.
+        distribution if the tensor has no expert dimension.
     """
     with torch.no_grad():
         if logits.ndim < 1 or logits.shape[-1] < 1:
             return np.array([1.0], dtype=np.float64)
 
-        probs = torch.softmax(logits.float(), dim=-1)
+        t = logits.float()
 
-        # Average over all batch/token dimensions.
-        if probs.ndim > 1:
-            probs = probs.reshape(-1, probs.shape[-1]).mean(dim=0)
+        # Detect whether the stored tensor is already a probability vector.
+        # The router_hook stores mean_probs (shape [n_experts]) as a compact
+        # representation.  A probability vector satisfies:
+        #   (a) 1-D  (b) all values >= 0  (c) sum ≈ 1.0
+        already_probs = (
+            t.ndim == 1
+            and bool((t >= 0).all())
+            and bool(torch.abs(t.sum() - 1.0) < 1e-3)
+        )
+
+        if already_probs:
+            # Values are already probabilities — return directly.
+            probs = t
+        else:
+            # Raw logits: apply softmax, then average over batch/token dims.
+            probs = torch.softmax(t, dim=-1)
+            if probs.ndim > 1:
+                probs = probs.reshape(-1, probs.shape[-1]).mean(dim=0)
 
         return probs.cpu().numpy().astype(np.float64)
 

@@ -85,9 +85,15 @@ class RoutingEvent:
         analysis); shape is typically ``[batch_size * seq_len, n_experts]``
         or ``[batch_size, seq_len, n_experts]``.
     selected_experts : torch.Tensor
-        Indices of the top-k selected experts derived from
-        ``routing_logits`` via ``topk``; shape mirrors
-        ``routing_logits`` with the last dimension reduced to ``k``.
+        Per-expert token counts — shape ``[n_experts]``, dtype ``int64``.
+        Stores how many tokens were routed to each expert in this forward
+        pass, replacing the previous flat index tensor of shape
+        ``[batch_size * seq_len * top_k]``.
+
+        Memory comparison (Mixtral, seq=2048, top_k=2, n_experts=8):
+          Old (flat indices) : 2048 × 2 × 8 bytes = 32 KB / event
+          New (expert counts): 8 × 8 bytes         =  64 B / event
+          Savings            : ~500× per event → ~1 GB → ~2 MB for 32 layers
     expert_count : int
         Number of experts ``n_experts``, inferred from the last dimension
         of ``routing_logits``.
@@ -100,7 +106,7 @@ class RoutingEvent:
     global_step: int
     layer_name: str
     routing_logits: torch.Tensor
-    selected_experts: torch.Tensor
+    selected_experts: torch.Tensor   # shape: [n_experts] — per-expert token COUNTS
     expert_count: int
     batch_size: int
 
@@ -263,18 +269,28 @@ class RouterForwardHook:
                 # selected_experts (needs index values, not pre-aggregated
                 # counts), and _stack_logits_window() stacks routing_logits
                 # (1-D mean-prob vectors work for entropy computation).
-                probs = torch.softmax(
-                    logits_detached.reshape(-1, expert_count).float(), dim=-1
-                )
-                mean_probs_cpu = probs.mean(dim=0).cpu()          # (n_experts,)
-                selected_experts_cpu = selected_experts.reshape(-1).cpu()  # flat indices
+                flat = logits_detached.reshape(-1, expert_count).float()
+                probs = torch.softmax(flat, dim=-1)
+                mean_probs_cpu = probs.mean(dim=0).cpu()          # [n_experts] mean prob
+
+                # Store per-expert token COUNTS instead of flat token indices.
+                # Old: selected_experts_cpu = selected_experts.reshape(-1).cpu()
+                #      shape [batch*seq*top_k] — up to 32 KB per event (Mixtral).
+                # New: bincount at write time → shape [n_experts] — 64 B per event.
+                # stat_collector.get_all_stats() now simply sums these count tensors
+                # across the window instead of running bincount at read time.
+                flat_idx = selected_experts.reshape(-1).to(dtype=torch.long)
+                flat_idx = flat_idx.clamp(min=0, max=int(expert_count) - 1)
+                expert_counts_cpu = torch.bincount(
+                    flat_idx.cpu(), minlength=int(expert_count)
+                ).to(dtype=torch.long)                            # [n_experts] counts
 
                 event = RoutingEvent(
                     timestamp=time.time(),
                     global_step=self._global_step,
                     layer_name=self.layer_name,
-                    routing_logits=mean_probs_cpu,         # compact (n_experts,) CPU
-                    selected_experts=selected_experts_cpu, # flat indices, CPU
+                    routing_logits=mean_probs_cpu,          # [n_experts] mean prob, CPU
+                    selected_experts=expert_counts_cpu,     # [n_experts] counts, CPU
                     expert_count=int(expert_count),
                     batch_size=int(batch_size),
                 )
