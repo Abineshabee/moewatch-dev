@@ -399,6 +399,11 @@ class MoEWatch:
 
         Side Effects
         ------------
+        - Reverts every active or persistent intervention held by
+          :attr:`intervention_engine` (see
+          :meth:`~moewatch.intervention.engine.InterventionEngine.revert_all`),
+          so no forward hook, ``model.config`` change, or dropout-probability
+          change installed by MoEWatch remains active on the model.
         - Removes all registered forward and backward hooks from the model.
         - Sets ``_running = False``.
         - Emits a final summary log if output is not SILENT.
@@ -411,6 +416,19 @@ class MoEWatch:
         # Restore logger level if it was suppressed by SILENT mode.
         if self.config.output == OutputMode.SILENT:
             logging.getLogger("moewatch").setLevel(logging.NOTSET)
+
+        try:
+            if self.intervention_engine is not None:
+                reverted = self.intervention_engine.revert_all()
+                if reverted:
+                    logger.debug(
+                        "[MoEWatch] Reverted %d intervention(s) still "
+                        "installed at stop(): %s",
+                        len(reverted),
+                        reverted,
+                    )
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.error("[MoEWatch] Error reverting interventions during stop(): %s", exc)
 
         try:
             if self.hook_manager is not None:
@@ -616,18 +634,7 @@ class MoEWatch:
         except Exception as exc:
             logger.debug("[MoEWatch] CrossLayerCorrelation error at step %d: %s", global_step, exc)
 
-        # ---- 2. Update baseline tracker with latest entropy signals ----
-        for layer_name, ent_report in entropy_reports.items():
-            try:
-                self.baseline_tracker.update_signal(
-                    layer_name=layer_name,
-                    value=ent_report.normalized_entropy,
-                    step=global_step,
-                )
-            except Exception:
-                pass
-
-        # ---- 3. Fuse signals into risk scores ----
+        # ---- 2. Fuse signals into risk scores ----
         step_risk_scores: Dict[str, float] = {}
         step_risk_levels: Dict[str, str] = {}
         dominant_signals: Dict[str, str] = {}
@@ -697,6 +704,28 @@ class MoEWatch:
                     "[MoEWatch] Risk fusion error for layer '%s' at step %d: %s",
                     layer_name, global_step, exc,
                 )
+
+        # ---- 3. Update baseline tracker with the SAME metric used later for
+        # counterfactual reward comparison. InterventionEngine.check_observation_
+        # windows() compares the actual value at window-close against this
+        # baseline's projection using risk_scores (see its docstring: "lower
+        # risk is healthier" / reward = baseline_projected - actual_risk).
+        # The baseline must therefore be fit on risk_score history, not on
+        # raw entropy — otherwise the projected baseline and the value it's
+        # compared against are two different metrics with different scales
+        # and semantics, making the reward signal meaningless. Only layers
+        # that made it through risk fusion this step (i.e. have a
+        # step_risk_scores entry) are updated.
+        for layer_name, risk_score in step_risk_scores.items():
+            try:
+                self.baseline_tracker.update_signal(
+                    layer_name=layer_name,
+                    value=risk_score,
+                    step=global_step,
+                )
+            except Exception:
+                pass
+
 
         # ---- 4. Generate alerts ----
         new_alerts: List[Alert] = []
@@ -1172,7 +1201,13 @@ class MoEWatch:
                 action = self.policy.select_action(state)
                 policy_decisions[layer_name] = action.action_type
 
-                # Safety validation and potential downgrade
+                # Global aux_loss is shared across the whole model.
+                # Reject duplicate candidates BEFORE touching engine state.
+                if action.action_type == "aux_loss":
+                    if "aux_loss" in _global_action_applied:
+                        policy_decisions[layer_name] = "noop"
+                        continue
+
                 validated_action = self.intervention_engine.propose_intervention(
                     action=action,
                     current_loss=current_loss,
@@ -1181,17 +1216,16 @@ class MoEWatch:
                     step=step,
                 )
 
-                # Apply validated action (may be NoOp after safety downgrade)
+                # Only mark it as globally applied after validation succeeds.
                 if validated_action.action_type != "noop":
-                    # aux_loss modifies a global model.config field — only
-                    # apply it once per step (for the highest-risk layer
-                    # that triggers it first in iteration order).
                     if validated_action.action_type == "aux_loss":
-                        if "aux_loss" in _global_action_applied:
-                            policy_decisions[layer_name] = "noop"
-                            continue
                         _global_action_applied.add("aux_loss")
-                    self.intervention_engine.apply_intervention(validated_action, step)
+
+                    self.intervention_engine.apply_intervention(
+                        validated_action,
+                        step,
+                        state,
+                    )
                     applied_interventions.append(validated_action)
                     # Mark baseline as intervention-influenced
                     self.baseline_tracker.mark_intervention(

@@ -218,13 +218,18 @@ class InterventionEngine:
         :class:`~moewatch.intervention.actions.AuxLossAction`, which
         mutates a single shared ``model.config`` field rather than its
         own layer's submodule) and a *different* layer already has an
-        active intervention of the same ``action_type``, the proposed
-        action is likewise downgraded to NoOp — even though the two
-        layers are otherwise unrelated, allowing both to be active
-        simultaneously would mean two independent actions mutating the
-        same underlying field, each tracking its own pre-apply snapshot;
-        whichever reverts first would restore the field to *its* snapshot
-        and silently erase the other's still-active contribution.
+        active or persistent intervention of the same ``action_type``,
+        the new action is logged as an ``"accumulated"`` event but is
+        **not** downgraded or specially applied here — it is tracked as
+        its own independent owned intervention via the normal
+        staging/apply path, so it gets its own observation window and can
+        later be reverted or made persistent on its own. This relies on
+        the action's :meth:`~moewatch.intervention.actions.InterventionAction.revert`
+        removing only its own contribution from the shared field (as
+        :class:`~moewatch.intervention.actions.AuxLossAction` does) rather
+        than resetting to an absolute pre-apply snapshot, so two
+        independent owners on the same global resource cannot erase each
+        other's contribution.
         """
         action.mark_applied(step)
 
@@ -281,25 +286,40 @@ class InterventionEngine:
             conflicting_layer = self._find_conflicting_global_intervention(action)
             if conflicting_layer is not None:
                 # A different layer already holds an active or persistent
-                # intervention on the same global resource. Accumulate the
-                # new delta on top — safety has been confirmed above so it
-                # is correct to mutate the model here.
-                existing_action, _ = self._active_interventions.get(
-                    conflicting_layer,
-                    self._persistent_interventions.get(conflicting_layer, (None, None)),
-                )
-                if existing_action is not None:
-                    existing_action.apply(self.model)  # idempotent on AuxLoss
+                # intervention on the same global resource. We used to
+                # apply() both actions here and discard this one as a NoOp,
+                # because no owner was ever recorded for its delta — nobody
+                # would call revert() on it, so on a long run the shared
+                # config field could drift upward forever, invisibly, across
+                # unrelated safety windows/cooldowns/rollback (see engine
+                # history for the "orphaned accumulation" bug this caused).
+                #
+                # AuxLossAction.revert() now subtracts only its OWN delta
+                # from whatever value is currently on the config, instead of
+                # resetting to an absolute pre-apply snapshot (see
+                # AuxLossAction.revert() docstring) — so two independent
+                # owners on the same global resource no longer risk erasing
+                # each other's contribution when one reverts before the
+                # other. That means this action can now be treated like any
+                # other proposal: it is NOT special-cased or mutated here;
+                # it falls through to the normal staging/apply path below,
+                # so apply_intervention() registers it as a real active
+                # intervention (own observation window, own eventual
+                # revert-or-persist decision, own ownership). Its apply()
+                # will naturally add its delta on top of whatever the
+                # conflicting layer's action already put on the shared
+                # config field — no manual pre-application needed.
                 logger.info(
                     "[MoEWatch] InterventionEngine: '%s' on layer '%s' "
-                    "accumulates onto existing '%s' intervention owned by "
-                    "layer '%s' (global resource shared).",
+                    "will accumulate onto existing '%s' intervention owned "
+                    "by layer '%s' (global resource shared); tracking as "
+                    "its own owned intervention so it can later be "
+                    "reverted or made persistent independently.",
                     action.action_type,
                     action.layer_name,
                     action.action_type,
                     conflicting_layer,
                 )
-                action.apply(self.model)
                 self._intervention_log.append(
                     {
                         "event": "accumulated",
@@ -310,9 +330,8 @@ class InterventionEngine:
                         "delta": action.delta,
                     }
                 )
-                noop = NoOpAction(layer_name=action.layer_name)
-                noop.mark_applied(step)
-                return noop
+                # Falls through — no early return. action is staged/applied
+                # via the normal path below and by apply_intervention().
 
         # Safety PASSED and no global-resource conflict.
         # Stage the existing persistent intervention (if any) for atomic
@@ -763,6 +782,66 @@ class InterventionEngine:
             layer_name in self._active_interventions
             or layer_name in self._persistent_interventions
         )
+
+    def revert_all(self) -> List[str]:
+        """Revert every currently-installed intervention and clear bookkeeping.
+
+        Reverts every action in :attr:`_active_interventions` and
+        :attr:`_persistent_interventions` (via
+        :meth:`InterventionAction.revert`), then clears
+        :attr:`_active_interventions`, :attr:`_persistent_interventions`,
+        :attr:`_observation_windows`, :attr:`_pending_states`, and
+        :attr:`_pending_reverts`.
+
+        Intended for use when monitoring is being torn down (e.g.
+        :meth:`MoEWatch.stop`) so that no intervention is left modifying
+        model execution — a forward hook still installed, a
+        ``model.config`` field still shifted, a dropout probability still
+        raised — after the engine that owns it has stopped observing and
+        can no longer revert it on a negative reward.
+
+        A single action's :meth:`~moewatch.intervention.actions.InterventionAction.revert`
+        raising is logged and does not prevent the remaining actions from
+        being reverted.
+
+        Returns
+        -------
+        list[str]
+            Layer names whose intervention was successfully reverted.
+        """
+        reverted: List[str] = []
+        # A layer can appear in both dicts only transiently; in steady state
+        # each layer is in at most one. Iterate over a combined, deduplicated
+        # view so a persistent-only layer (no pending observation window)
+        # is not skipped.
+        all_layers = {**self._persistent_interventions, **self._active_interventions}
+
+        for layer_name, (action, _applied_step) in all_layers.items():
+            try:
+                action.revert(self.model)
+                reverted.append(layer_name)
+                logger.info(
+                    "[MoEWatch] InterventionEngine.revert_all(): reverted "
+                    "%s on layer '%s'.",
+                    action.log(),
+                    layer_name,
+                )
+            except Exception as exc:  # pylint: disable=broad-except
+                logger.error(
+                    "[MoEWatch] InterventionEngine.revert_all(): failed to "
+                    "revert %s on layer '%s': %s",
+                    action.log(),
+                    layer_name,
+                    exc,
+                )
+
+        self._active_interventions.clear()
+        self._persistent_interventions.clear()
+        self._observation_windows.clear()
+        self._pending_states.clear()
+        self._pending_reverts.clear()
+
+        return reverted
 
     def __repr__(self) -> str:
         return (
