@@ -486,9 +486,9 @@ def test_get_intervention_history(moe_model):
 
     watch.intervention_engine = MagicMock()
     watch.intervention_engine._intervention_log = [
-        {"layer_name": "layer0", "action_type": "rebalance"},
-        {"layer_name": "layer1", "action_type": "freeze"},
-        {"layer_name": "layer0", "action_type": "reroute"},
+        {"event": "applied", "layer": "layer0", "action": "rebalance"},
+        {"event": "applied", "layer": "layer1", "action": "freeze"},
+        {"event": "resolved", "layer": "layer0", "action": "reroute"},
     ]
 
     history = watch._get_intervention_history("layer0")

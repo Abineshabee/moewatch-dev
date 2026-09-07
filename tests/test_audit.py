@@ -264,6 +264,22 @@ class TestModelUnchanged:
                 f"Parameter '{name}' was modified by audit()"
             )
 
+    def test_audit_restores_mixed_module_training_states(
+        self, small_moe_model: FakeMoEModel
+    ) -> None:
+        """audit() must preserve each module's original train/eval state."""
+        small_moe_model.train()
+        special_child = small_moe_model.layers[0].experts[0]
+        special_child.eval()
+
+        before = {name: module.training for name, module in small_moe_model.named_modules()}
+
+        _run_audit(small_moe_model, hidden=small_moe_model.hidden)
+
+        after = {name: module.training for name, module in small_moe_model.named_modules()}
+        assert after == before
+
+
     def test_audit_does_not_require_grad(self, small_moe_model: FakeMoEModel) -> None:
         """audit() must not accidentally enable gradient tracking on parameters."""
         # Set all params to no-grad

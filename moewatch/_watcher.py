@@ -1267,10 +1267,14 @@ class MoEWatch:
         history = []
         if self.intervention_engine is None:
             return history
-        # Retrieve from engine's internal log
+        # Retrieve from engine's internal log.  InterventionEngine uses
+        # ``layer`` and ``action`` as the canonical keys for lifecycle records.
+        # Keep the fallback keys for compatibility with older in-memory logs
+        # that used ``layer_name`` / ``action_type``.
         for entry in self.intervention_engine._intervention_log:
-            if entry.get("layer_name") == layer_name:
-                history.append(entry.get("action_type", "unknown"))
+            entry_layer = entry.get("layer", entry.get("layer_name"))
+            if entry_layer == layer_name:
+                history.append(entry.get("action", entry.get("action_type", "unknown")))
         return history[-10:]  # Return last 10 actions
 
     # ------------------------------------------------------------------

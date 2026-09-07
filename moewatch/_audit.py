@@ -197,6 +197,13 @@ def audit(
 
     # Capture original state before any mutation.
     _original_training: bool = model.training
+    # Snapshot every module's training flag, not just the root model flag.
+    # A model may intentionally contain mixed train/eval submodules; calling
+    # model.train()/model.eval() recursively would otherwise overwrite those
+    # states during audit and fail to restore the caller's exact runtime state.
+    _original_training_states: dict[nn.Module, bool] = {
+        module: module.training for module in model.modules()
+    }
     _original_device: torch.device = _get_model_device(model)
     _original_grads: dict = {
         n: (p.grad.clone() if p.grad is not None else None)
@@ -293,10 +300,11 @@ def audit(
         #   • device         (move back if we changed it)
         #   • gradients      (restore or clear what was there before)
         try:
-            if _original_training:
-                model.train()
-            else:
-                model.eval()
+            # Restore each module individually so mixed train/eval configurations
+            # are preserved exactly.  Calling model.train()/model.eval() here
+            # would recursively overwrite child-module states.
+            for module, was_training in _original_training_states.items():
+                module.training = was_training
         except Exception:  # pylint: disable=broad-except
             pass
 
