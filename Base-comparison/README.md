@@ -4,6 +4,6 @@
 
 This comparison uses the **same** tiny MoE model, synthetic data, seed, optimizer, and collapse-pressure schedule. The only difference is whether MoEWatch is attached.
 
-![MoEWatch Comparison](./moewatch_comparison.png)
+![MoEWatch Comparison](./cp2/moewatch_comparison.png)
 
 **Takeaway:** Without MoEWatch the routers silently collapse under sustained pressure (2–3 dead experts per layer). With MoEWatch, interventions keep entropy high and dead-expert counts at zero — same training run, healthy gates.

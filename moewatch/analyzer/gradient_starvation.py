@@ -511,7 +511,11 @@ class GradientStarvationAnalyzer:
         if is_new_observation:
             last_seen_map[expert_id] = step
 
-            if below_cold:
+        if below_cold:
+            # Only advance the consecutive-cold counter on a genuine new
+            # observation (new global_step). Re-analyzing the same step
+            # must not inflate the counter.
+            if is_new_observation:
                 counter_map[expert_id] += 1
                 if onset_map[expert_id] is None:
                     # Determine the onset step as accurately as possible.
@@ -542,23 +546,22 @@ class GradientStarvationAnalyzer:
                         norm_mean,
                         cold_threshold,
                     )
-            else:
-                # Expert has recovered — reset counter and onset.
-                if counter_map[expert_id] > 0:
-                    logger.debug(
-                        "[MoEWatch] GradientStarvationAnalyzer: expert %d in "
-                        "'%s' recovered at step %d (norm_mean=%.5f).",
-                        expert_id,
-                        layer_name,
-                        step,
-                        norm_mean,
-                    )
-                counter_map[expert_id] = 0
-                onset_map[expert_id] = None
-        # else: stale snapshot (no new GradientEvent since the last
-        # analyze() call for this expert) — counter_map/onset_map are
-        # left exactly as they were; `below_cold` below still reflects
-        # the most recent real observation for reporting purposes.
+        else:
+            # Expert has recovered (rolling mean back above cold_threshold).
+            # Clear counter and onset even if this is a re-analysis of the
+            # same step — more samples may have been written into the
+            # buffer and pushed the mean healthy without a step advance.
+            if counter_map[expert_id] > 0 or onset_map[expert_id] is not None:
+                logger.debug(
+                    "[MoEWatch] GradientStarvationAnalyzer: expert %d in "
+                    "'%s' recovered at step %d (norm_mean=%.5f).",
+                    expert_id,
+                    layer_name,
+                    step,
+                    norm_mean,
+                )
+            counter_map[expert_id] = 0
+            onset_map[expert_id] = None
 
         consecutive_cold = counter_map[expert_id]
         starvation_detected = consecutive_cold >= self.config.cold_steps_limit
