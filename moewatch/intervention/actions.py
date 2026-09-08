@@ -671,6 +671,9 @@ class RouterNoiseAction(InterventionAction):
         def _noise_hook(
             _module: "torch.nn.Module", _inputs: Any, output: Any
         ) -> Any:
+            if not getattr(_module, "training", False):
+                return output
+
             if isinstance(output, Tensor):
                 return output + torch.randn_like(output) * noise_scale
 

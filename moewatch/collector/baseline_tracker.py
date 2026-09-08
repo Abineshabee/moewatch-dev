@@ -191,12 +191,11 @@ class BaselineTracker:
         Thread-safe. Multiple overlapping or sequential exclusion windows
         for the same layer are all retained (no merging) — overlap is
         harmless since :meth:`update_signal` only needs to check
-        membership in *any* window. Calling this method does not
-        retroactively remove already-recorded clean history points that
-        happen to fall inside the new window (those points were recorded
-        as clean *before* this intervention was known, which is the
-        correct causal ordering: only future observations are affected by
-        an intervention applied now).
+        membership in *any* window. Any clean-history points already
+        recorded with ``start_step <= step < end_step`` are removed so
+        that a same-step ``update_signal`` → ``mark_intervention``
+        sequence (as in :meth:`MoEWatch.step`) does not leave the
+        trigger risk value inside the counterfactual baseline.
         """
         if layer_name not in self._intervention_windows:
             self.register_layer(layer_name)
@@ -213,6 +212,16 @@ class BaselineTracker:
             if len(windows) > self._MAX_HISTORY_LENGTH:
                 self._intervention_windows[layer_name] = windows[
                     -self._MAX_HISTORY_LENGTH :
+                ]
+
+            # MoEWatch.step() writes baseline signals *before* interventions
+            # are applied in the same step. Without a retroactive strip, the
+            # high-risk trigger point stays in "clean" history and biases the
+            # counterfactual projection (reward becomes systematically wrong).
+            hist = self._clean_history.get(layer_name)
+            if hist:
+                self._clean_history[layer_name] = [
+                    (s, v) for (s, v) in hist if not (start_step <= s < end_step)
                 ]
 
         logger.debug(

@@ -779,13 +779,30 @@ class MoEWatch:
                                 key=lambda r: r.starvation_score,
                             )
 
-                if ent_report is None or grad_report is None:
+                if ent_report is None:
                     continue
+
+                # Entropy-only risk when Tier-1 is missing (no backward yet,
+                # expert never selected, or sample_every skipped grads).
+                # Previously the whole layer was dropped, so pure entropy
+                # collapse could never raise risk or trigger interventions.
+                t1_available = grad_report is not None
+                if not t1_available:
+                    from moewatch.analyzer.gradient_starvation import (
+                        GradientStarvationReport,
+                    )
+                    grad_report = GradientStarvationReport(
+                        layer_name=layer_name,
+                        expert_id=0,
+                        starvation_score=0.0,
+                        starvation_detected=False,
+                    )
 
                 risk_report = self.risk_fuser.fuse(
                     gradient_report=grad_report,
                     entropy_report=ent_report,
                     cross_layer_report=cross_layer_report,
+                    t1_available=t1_available,
                 )
                 risk_reports[layer_name] = risk_report
                 step_risk_scores[layer_name] = risk_report.risk_score
