@@ -560,3 +560,112 @@ class TestGradientStarvationRepr:
         assert "GradientStarvationAnalyzer" in text
         assert "cold_threshold" in text
         assert "cold_steps_limit" in text
+
+
+# ===========================================================================
+# ── Systemic-floor self-calibration (regression) ─────────────────────────────
+# ===========================================================================
+#
+# The relative peer-comparison threshold self-calibrates to whatever
+# gradient-norm scale a model actually produces, but on its own it cannot
+# see a layer where EVERY expert collapses together (they still look
+# "equal" to each other). A systemic floor is needed to catch that case —
+# but the floor must itself be scale-aware, or it breaks self-calibration
+# for any model whose healthy scale sits below the floor's own value.
+
+
+class TestGradientStarvationSystemicFloor:
+    def test_healthy_small_scale_layer_not_falsely_flagged(
+        self,
+    ) -> None:
+        """Regression: with the library's DEFAULT config (cold_threshold=1.0,
+        cold_steps_limit=50), a perfectly healthy layer whose real gradient
+        norms sit at a small, realistic scale (~0.01 — common for many
+        models) must NOT be flagged as starving just because 0.01 < 1.0.
+
+        Before this fix, the systemic-collapse floor was
+        ``max(relative, config.cold_threshold)`` — the raw absolute
+        constant, defaulting to 1.0. Since 1.0 unconditionally dominates
+        the max() for any model whose real scale is below it, EVERY expert
+        on such a model was permanently misclassified as starving, even
+        with balanced, healthy routing and zero actual collapse.
+        """
+        config = WatchConfig(output=OutputMode.SILENT)
+        assert config.cold_threshold == 1.0  # the problematic default
+        analyzer = GradientStarvationAnalyzer(config)
+        collector = StatCollector(config)
+
+        step = 0
+        reports = None
+        for _ in range(config.cold_steps_limit + 5):
+            for expert_id in range(4):
+                step += 1
+                # Healthy, balanced, but small-scale (well below 1.0).
+                norm = 0.01 + (0.0005 if expert_id % 2 == 0 else -0.0005)
+                collector.write_gradient_event(
+                    make_gradient_event(
+                        layer_name="layers.0.experts",
+                        expert_id=expert_id,
+                        gradient_norm=norm,
+                        global_step=step,
+                    )
+                )
+            reports = analyzer.analyze(collector)
+
+        for r in reports["layers.0.experts"]:
+            assert r.starvation_detected is False, (
+                f"expert {r.expert_id} falsely flagged as starving "
+                f"(norm_mean={r.gradient_norm_mean}) on a healthy "
+                "small-gradient-scale model."
+            )
+
+    def test_systemic_collapse_of_all_experts_still_detected(
+        self,
+    ) -> None:
+        """The systemic floor must still catch every expert in a layer
+        collapsing together (which a pure peer-relative threshold cannot
+        see, since they stay proportionally "equal" to each other) — this
+        fix must not trade the false-positive fix for a false negative.
+        """
+        config = WatchConfig(output=OutputMode.SILENT)
+        analyzer = GradientStarvationAnalyzer(config)
+        collector = StatCollector(config)
+
+        step = 0
+        # Phase 1: healthy, balanced, small-scale — establishes the layer's
+        # historical peak norm (~0.01).
+        for _ in range(30):
+            for expert_id in range(4):
+                step += 1
+                norm = 0.01 + (0.0005 if expert_id % 2 == 0 else -0.0005)
+                collector.write_gradient_event(
+                    make_gradient_event(
+                        layer_name="layers.0.experts",
+                        expert_id=expert_id,
+                        gradient_norm=norm,
+                        global_step=step,
+                    )
+                )
+            analyzer.analyze(collector)
+
+        # Phase 2: ALL 4 experts collapse together to near-zero, long
+        # enough for the stats window to fill entirely with collapsed data.
+        reports = None
+        for _ in range(200):
+            for expert_id in range(4):
+                step += 1
+                collector.write_gradient_event(
+                    make_gradient_event(
+                        layer_name="layers.0.experts",
+                        expert_id=expert_id,
+                        gradient_norm=1e-6,
+                        global_step=step,
+                    )
+                )
+            reports = analyzer.analyze(collector)
+
+        for r in reports["layers.0.experts"]:
+            assert r.starvation_detected is True, (
+                f"expert {r.expert_id} was NOT flagged despite a systemic "
+                f"all-expert collapse (norm_mean={r.gradient_norm_mean})."
+            )

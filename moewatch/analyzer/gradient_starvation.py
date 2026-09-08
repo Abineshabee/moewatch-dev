@@ -41,12 +41,17 @@
 #   cold_threshold is primarily RELATIVE whenever a layer has >= 2 experts
 #   with sufficient samples:
 #       relative = _RELATIVE_COLD_FRACTION * median(norm across layer-mates)
-#       threshold = max(relative, config.cold_threshold, 1e-9)
+#       systemic_floor = _RELATIVE_COLD_FRACTION * this layer's own
+#                         historical peak median norm (_layer_peak_norm)
+#       threshold = max(relative, systemic_floor, 1e-9)
 #   Using the median keeps a single outlier from skewing the reference.
-#   The absolute config.cold_threshold is always applied as a floor so that
-#   systemic collapse (all experts starving together) cannot hide behind a
-#   collapsing relative reference. When there is no peer group (e.g. a
-#   single-expert layer), only the absolute threshold is used — see
+#   The systemic_floor is anchored to THIS layer's own observed history
+#   (not a fixed config constant) so that systemic collapse (all experts
+#   starving together, which drags the current relative reference down
+#   with them) is still caught, without misfiring on models whose healthy
+#   gradient-norm scale is naturally small. When there is no peer group
+#   (e.g. a single-expert layer) or no historical peak yet, only the
+#   absolute config.cold_threshold is used as a fallback — see
 #   `_compute_layer_mean_norm`.
 #
 # Dependencies
@@ -208,6 +213,24 @@ class GradientStarvationAnalyzer:
         # the configured number of training steps.
         self._last_seen_step: Dict[str, Dict[int, int]] = {}
 
+        # Highest layer_mean_norm (peer-median gradient norm) ever observed
+        # for this layer, once it has >= 2 valid peer experts. Used as a
+        # self-calibrating reference for detecting SYSTEMIC collapse (every
+        # expert in the layer going cold together, which a purely relative
+        # threshold cannot see — see the "systemic floor" comment in
+        # `_analyze_expert`), instead of the arbitrary fixed
+        # `config.cold_threshold`. A model's real gradient-norm scale is
+        # unknowable in advance (0.001-0.01 for some models, 1-10 for
+        # others); anchoring the systemic floor to config.cold_threshold's
+        # default (1.0) makes every expert on any smaller-scale model
+        # permanently misclassified as starving — the exact failure mode
+        # `_compute_layer_mean_norm`'s docstring already describes fixing
+        # once (see that docstring). Anchoring instead to this layer's own
+        # historical peak keeps the floor meaningful at whatever scale this
+        # specific layer actually operates at.
+        # {layer_name: peak_layer_mean_norm}
+        self._layer_peak_norm: Dict[str, float] = {}
+
     # ------------------------------------------------------------------
     # Primary analysis method
     # ------------------------------------------------------------------
@@ -268,6 +291,16 @@ class GradientStarvationAnalyzer:
             layer_mean_norm, n_valid_experts = self._compute_layer_mean_norm(
                 expert_stats_map
             )
+
+            # Track this layer's own historical peak peer-median norm, used
+            # as the systemic-collapse floor in `_analyze_expert` (see
+            # `_layer_peak_norm` docstring in `__init__`). Only updated from
+            # a meaningful peer group (>= 2 valid experts) so a transient
+            # single-expert read can't establish a misleadingly low peak.
+            if n_valid_experts >= 2 and layer_mean_norm > self._layer_peak_norm.get(
+                layer_name, 0.0
+            ):
+                self._layer_peak_norm[layer_name] = layer_mean_norm
 
             # Process experts in deterministic order.
             for expert_id in sorted(expert_stats_map.keys()):
@@ -470,14 +503,29 @@ class GradientStarvationAnalyzer:
         # Prefer a threshold relative to this expert's layer-mates when at
         # least one other expert is available for comparison — this
         # self-calibrates to the model's real gradient scale (see
-        # `_compute_layer_mean_norm`). Always take the max with the absolute
-        # config.cold_threshold so that when *every* expert collapses
-        # together the relative reference cannot drag the threshold to
-        # near-zero and hide systemic starvation. With no peer group
-        # (single-expert layer), only the absolute threshold is used.
+        # `_compute_layer_mean_norm`). Also take the max with a SYSTEMIC
+        # floor derived from this layer's own historical peak peer-median
+        # norm (`_layer_peak_norm`, updated in `analyze()`), scaled by the
+        # same `_RELATIVE_COLD_FRACTION`. This catches the case a purely
+        # relative threshold misses — *every* expert in the layer going
+        # cold together, which drags the current relative reference down
+        # right along with them — without reintroducing the bug this
+        # mechanism previously had: using the raw, arbitrary
+        # `config.cold_threshold` (default 1.0) as that floor made any
+        # model whose real gradient scale sits below 1.0 (commonly
+        # 0.001-0.01) permanently misclassify every expert as starving,
+        # since 1.0 unconditionally dominated the max(). Anchoring the
+        # floor to what THIS layer itself has actually produced when
+        # healthy keeps it meaningful at whatever scale this layer
+        # operates at, while still catching a genuine drop from that
+        # layer's own history. With no peer group yet (single-expert
+        # layer, or no historical peak established), only the absolute
+        # `config.cold_threshold` is available as a fallback.
         if n_valid_experts >= 2 and layer_mean_norm > 1e-12:
             relative = layer_mean_norm * _RELATIVE_COLD_FRACTION
-            cold_threshold = max(relative, self.config.cold_threshold, 1e-9)
+            peak = self._layer_peak_norm.get(layer_name, 0.0)
+            systemic_floor = peak * _RELATIVE_COLD_FRACTION if peak > 1e-12 else 0.0
+            cold_threshold = max(relative, systemic_floor, 1e-9)
         else:
             cold_threshold = max(self.config.cold_threshold, 1e-9)
 
@@ -599,10 +647,12 @@ class GradientStarvationAnalyzer:
             self._starvation_counters.pop(layer_name, None)
             self._onset_steps.pop(layer_name, None)
             self._last_seen_step.pop(layer_name, None)
+            self._layer_peak_norm.pop(layer_name, None)
         else:
             self._starvation_counters.clear()
             self._onset_steps.clear()
             self._last_seen_step.clear()
+            self._layer_peak_norm.clear()
 
     def get_starvation_count(self, layer_name: str, expert_id: int) -> int:
         """Return current consecutive-cold-steps count for one expert.
