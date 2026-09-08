@@ -284,6 +284,31 @@ class HookManager:
         for hook in self._gradient_hooks:
             hook.set_global_step(global_step)
 
+    def arm(self) -> None:
+        """Enable event recording on every active router hook.
+
+        Called from ``MoEWatch.pre_step()`` immediately before the real
+        training forward pass, so the forward call MoEWatch is actually
+        tracking gets recorded.
+        """
+        for hook in self._router_hooks:
+            hook.set_armed(True)
+
+    def disarm(self) -> None:
+        """Disable event recording on every active router hook.
+
+        Called from the top of ``MoEWatch.step()``, after the training
+        forward/backward pass for the current step has already completed
+        and been recorded. Any further forward call through a monitored
+        module — e.g. an out-of-band evaluation pass a training script
+        makes for its own logging — is silently ignored until the next
+        :meth:`arm` call, instead of being recorded as if it were part of
+        this step's training and corrupting the entropy/risk-score
+        signal downstream analyzers compute from ``stat_collector``.
+        """
+        for hook in self._router_hooks:
+            hook.set_armed(False)
+
     def flush_missing_gradient_events(self, step: int = 0) -> None:
         """Stamp zero-norm events for experts whose param hook did not fire.
 

@@ -167,7 +167,7 @@ class RouterForwardHook:
     (``top_k`` / ``num_experts_per_tok``) when present.
     """
 
-    __slots__ = ("layer_name", "stat_collector", "config", "_global_step", "_model")
+    __slots__ = ("layer_name", "stat_collector", "config", "_global_step", "_model", "_armed")
 
     def __init__(
         self,
@@ -184,6 +184,39 @@ class RouterForwardHook:
         # Updated externally (by HookManager) before each forward pass so
         # that emitted events carry an accurate training step number.
         self._global_step: int = 0
+
+        # Gate on whether this hook is allowed to record the forward pass
+        # it observes. Set True by HookManager.arm() (called from
+        # MoEWatch.pre_step()) immediately before the real training
+        # forward pass, and set False by HookManager.disarm() (called at
+        # the top of MoEWatch.step(), after that forward pass has already
+        # completed and been recorded).
+        #
+        # Without this gate, ANY forward call through the monitored module
+        # — not just the one training forward pass per step — gets
+        # recorded as a RoutingEvent. This includes incidental evaluation
+        # calls a user's training script makes for its own logging/metrics
+        # purposes (e.g. a periodic `model(eval_batch)` snapshot) while
+        # MoEWatch's hooks are still attached. Such calls have nothing to
+        # do with training and are typically drawn from a different input
+        # distribution, so mixing them into the same rolling window used
+        # for entropy/risk-score computation silently corrupts the signal
+        # that drives alerting and intervention decisions — without ever
+        # affecting the model's actual training. Defaults to armed so a
+        # hook that is only driven by the step()-only fallback path (no
+        # pre_step() call) still records events as before.
+        self._armed: bool = True
+
+    def set_armed(self, armed: bool) -> None:
+        """Enable or disable event recording for this hook.
+
+        Parameters
+        ----------
+        armed : bool
+            ``True`` to record the next observed forward pass as usual;
+            ``False`` to silently ignore forward passes until re-armed.
+        """
+        self._armed = armed
 
     # ------------------------------------------------------------------
     # Hook entry point
@@ -225,7 +258,15 @@ class RouterForwardHook:
         Any exception raised while processing the event is caught and
         logged at DEBUG level rather than propagated, so a malformed or
         unexpected router output can never interrupt training.
+
+        If this hook is currently disarmed (see :attr:`_armed`), the call
+        returns immediately without extracting logits or touching
+        ``stat_collector`` — the forward pass is treated as unrelated to
+        the training step MoEWatch is tracking.
         """
+        if not self._armed:
+            return
+
         try:
             logits = self._extract_logits(output)
             if logits is None:

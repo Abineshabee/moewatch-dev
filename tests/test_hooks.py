@@ -852,3 +852,109 @@ def test_hook_writes_routing_event(
     assert isinstance(event, RoutingEvent)
     assert event.expert_count == 8
     assert event.batch_size == 3
+
+
+# ===========================================================================
+# ── Regression: out-of-band forward passes must not contaminate StatCollector
+# ===========================================================================
+
+
+class TestHookArmDisarmGate:
+    """Regression tests for the router-hook contamination bug.
+
+    Before this fix, ``RouterForwardHook`` recorded EVERY forward pass
+    through a monitored module, with no way to distinguish the one real
+    training forward pass per step from any other incidental forward call
+    (e.g. a user's own periodic evaluation snapshot for logging/metrics,
+    made *after* ``MoEWatch.step()`` returns but while hooks are still
+    attached). Because such calls are typically drawn from a different
+    input distribution than training, mixing them into the same rolling
+    window used for entropy/risk-score computation silently corrupted the
+    signal that drives alerting and intervention decisions.
+
+    The fix gates recording behind an ``armed`` flag: ``pre_step()`` arms
+    hooks immediately before the real forward pass; ``step()`` disarms
+    them once that pass has already been recorded, so anything the caller
+    does afterward (until the next ``pre_step()``) is safely ignored.
+    """
+
+    def test_disarmed_hook_does_not_write_routing_event(self, default_config):
+        """A disarmed hook must not call stat_collector.write_routing_event."""
+        collector = MagicMock()
+        hook = RouterForwardHook("layer", collector, default_config)
+
+        hook.set_armed(False)
+        hook(nn.Linear(8, 8), (), torch.randn(3, 8))
+
+        collector.write_routing_event.assert_not_called()
+
+    def test_armed_hook_writes_routing_event(self, default_config):
+        """An armed hook (the default) behaves exactly as before the fix."""
+        collector = MagicMock()
+        hook = RouterForwardHook("layer", collector, default_config)
+
+        hook(nn.Linear(8, 8), (), torch.randn(3, 8))
+
+        collector.write_routing_event.assert_called_once()
+
+    def test_rearming_resumes_recording(self, default_config):
+        """set_armed(True) after set_armed(False) resumes normal recording."""
+        collector = MagicMock()
+        hook = RouterForwardHook("layer", collector, default_config)
+
+        hook.set_armed(False)
+        hook(nn.Linear(8, 8), (), torch.randn(3, 8))
+        assert collector.write_routing_event.call_count == 0
+
+        hook.set_armed(True)
+        hook(nn.Linear(8, 8), (), torch.randn(3, 8))
+        assert collector.write_routing_event.call_count == 1
+
+    def test_hook_manager_arm_disarm_fan_out(self, default_config):
+        """HookManager.arm()/disarm() must toggle every attached router hook."""
+        model = FakeMoEModel()
+        collector = StatCollector(default_config)
+        manager = HookManager(model, collector, default_config)
+        manager.attach()
+        try:
+            manager.disarm()
+            for hook in manager._router_hooks:
+                assert hook._armed is False
+
+            manager.arm()
+            for hook in manager._router_hooks:
+                assert hook._armed is True
+        finally:
+            manager.detach()
+
+    def test_out_of_band_forward_pass_does_not_pollute_stat_collector(
+        self, default_config
+    ):
+        """End-to-end: an out-of-band forward pass between step() and the
+        next pre_step() must not add a RoutingEvent, while the real
+        pre_step()-bracketed forward pass still does."""
+        model = FakeMoEModel()
+        collector = StatCollector(default_config)
+        manager = HookManager(model, collector, default_config)
+        manager.attach()
+        try:
+            layer_name = next(iter(manager.get_layer_map()))
+            buffer = collector._routing_buffers[layer_name]
+
+            # Simulate pre_step() -> real forward -> step()-disarm.
+            manager.arm()
+            model(torch.randn(3, model.hidden))
+            count_after_real_forward = len(buffer)
+
+            manager.disarm()
+
+            # Out-of-band forward pass (e.g. an eval snapshot) — must be ignored.
+            model(torch.randn(3, model.hidden))
+            count_after_oob_forward = len(buffer)
+
+            assert count_after_oob_forward == count_after_real_forward, (
+                "An out-of-band forward pass while disarmed must not add "
+                "any additional recorded routing events."
+            )
+        finally:
+            manager.detach()

@@ -268,6 +268,19 @@ class MoEWatch:
         # --- Internal state ---
         self._running: bool = False
         self._global_step: int = 0
+
+        # Set True the first time pre_step() is called. Once a caller has
+        # demonstrated it uses the pre_step()/step() bracketing pattern,
+        # step() stops re-arming hooks on its own at the end of the call
+        # (see the arm()/disarm() wiring in pre_step()/step()) — otherwise
+        # that fallback re-arm would immediately undo the protection
+        # step()'s disarm() call is there to provide, and any out-of-band
+        # forward pass the caller makes after step() (e.g. an evaluation
+        # snapshot for logging) would still be recorded and corrupt the
+        # entropy/risk-score signal. Callers that only ever call step()
+        # (never pre_step()) keep the original best-effort fallback
+        # behavior: hooks stay armed between step() calls.
+        self._pre_step_ever_called: bool = False
         self._start_time: float = 0.0
         self._trainer: Optional[object] = None  # transformers.Trainer
 
@@ -530,9 +543,19 @@ class MoEWatch:
             The training step number about to begin.
         """
         self._global_step = global_step
+        self._pre_step_ever_called = True
         if self.hook_manager is not None:
             try:
                 self.hook_manager.set_global_step(global_step)
+                # Re-arm router hooks so the forward pass about to happen
+                # (the real training forward this pre_step() call is
+                # announcing) gets recorded. step() disarms them again
+                # once this step's forward/backward has already been
+                # captured, so any incidental forward call a caller makes
+                # between step() and the next pre_step() — e.g. an
+                # evaluation snapshot for logging — is safely ignored
+                # instead of corrupting the entropy/risk-score signal.
+                self.hook_manager.arm()
             except Exception as exc:  # pylint: disable=broad-except
                 logger.debug(
                     "[MoEWatch] pre_step(): failed to propagate global_step "
@@ -604,6 +627,29 @@ class MoEWatch:
                 logger.debug(
                     "[MoEWatch] step(): failed to propagate global_step "
                     "to hook_manager: %s",
+                    exc,
+                )
+
+            # Disarm router hooks now that this step's real training
+            # forward/backward pass has already happened and been
+            # recorded (it occurred before this step() call, between the
+            # matching pre_step() and here). Any forward call a caller
+            # makes after this point — e.g. an evaluation snapshot taken
+            # for logging/metrics — will be silently ignored instead of
+            # being recorded as if it were part of training and
+            # corrupting the entropy/risk-score signal computed below.
+            #
+            # Re-armed at the end of this method as a best-effort fallback
+            # for callers that only invoke step() and never call
+            # pre_step(): for that usage pattern there is no signal for
+            # "the next real forward is about to start", so hooks stay
+            # armed between step() calls, matching this method's prior
+            # (pre-fix) behavior for that path.
+            try:
+                self.hook_manager.disarm()
+            except Exception as exc:  # pylint: disable=broad-except
+                logger.debug(
+                    "[MoEWatch] step(): failed to disarm hook_manager: %s",
                     exc,
                 )
 
@@ -815,6 +861,23 @@ class MoEWatch:
                 interventions=applied_interventions,
                 alerts=new_alerts,
             )
+
+        # Fallback re-arm for callers that only ever call step() and never
+        # pre_step(): such callers have no "forward is about to start"
+        # signal, so the best-effort behavior is to leave hooks armed
+        # between step() calls (matching this method's behavior before the
+        # arm()/disarm() gate existed). Callers that do use pre_step() are
+        # trusted to arm hooks themselves before each real forward pass,
+        # so skipping this keeps step()'s disarm() above in effect for
+        # any out-of-band forward call made after step() returns.
+        if not self._pre_step_ever_called and self.hook_manager is not None:
+            try:
+                self.hook_manager.arm()
+            except Exception as exc:  # pylint: disable=broad-except
+                logger.debug(
+                    "[MoEWatch] step(): failed to re-arm hook_manager: %s",
+                    exc,
+                )
 
         return step_report
 
