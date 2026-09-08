@@ -611,35 +611,56 @@ class InterventionEngine:
 
             reward = self._compute_reward(layer_name, actual_risk)
 
-            if reward < 0.0:
-                # Genuine negative reward: intervention did not help (or worsened
-                # risk relative to the baseline projection). Revert the action.
-                # reward == 0.0 means the baseline was not yet valid (neutral) —
-                # the action is left in place per the documented contract.
+            # Risk at the moment the intervention was applied (from the
+            # PolicyState recorded in apply_intervention). Used as a
+            # secondary signal when the linear clean-baseline projection
+            # is unreliable under a sustained distribution shift: the
+            # pre-pressure baseline stays low, so even a clearly helpful
+            # intervention that leaves residual risk (e.g. router noise
+            # fighting a held gate-bias of 2.0) can score reward < 0 and
+            # be incorrectly reverted — producing the L2 entropy spikes
+            # seen in the Base-comparison demo.
+            pending_state = self._pending_states.get(layer_name)
+            risk_at_apply = (
+                float(pending_state.risk_score)
+                if pending_state is not None
+                else actual_risk
+            )
+            improved_vs_apply = actual_risk < risk_at_apply - 1e-6
+
+            if reward < 0.0 and not improved_vs_apply:
+                # Counterfactual says no help AND risk did not fall since
+                # apply — genuine failure. Revert.
                 action.revert(self.model)
                 outcome = "failure"
                 logger.info(
                     "[MoEWatch] InterventionEngine: %s at step %d "
-                    "(applied step %d) -> reward=%.6f; reverted.",
+                    "(applied step %d) -> reward=%.6f "
+                    "risk_at_apply=%.4f actual=%.4f; reverted.",
                     action.log(),
                     step,
                     applied_step,
                     reward,
+                    risk_at_apply,
+                    actual_risk,
                 )
             else:
+                # success: positive/neutral counterfactual reward, OR risk
+                # improved vs apply time despite a misleading baseline
+                # projection under regime shift.
                 outcome = "success"
-                # Keep the action in the model but transfer ownership to
-                # _persistent_interventions so the handle is never orphaned.
-                # propose_intervention checks both dicts, preserving the
-                # "at most one intervention per layer" invariant across cycles.
                 self._persistent_interventions[layer_name] = (action, applied_step)
                 logger.info(
                     "[MoEWatch] InterventionEngine: %s at step %d "
-                    "(applied step %d) -> reward=%.6f; kept (persistent).",
+                    "(applied step %d) -> reward=%.6f "
+                    "risk_at_apply=%.4f actual=%.4f; kept (persistent)%s.",
                     action.log(),
                     step,
                     applied_step,
                     reward,
+                    risk_at_apply,
+                    actual_risk,
+                    " [improved-vs-apply override]" if (reward < 0.0 and improved_vs_apply) else "",
                 )
 
             self._intervention_log.append(
