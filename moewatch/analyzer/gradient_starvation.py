@@ -38,14 +38,16 @@
 #     consecutive_cold_steps >= config.cold_steps_limit
 #   starvation_onset_step recorded at first crossing of cold_threshold
 #
-#   cold_threshold is RELATIVE whenever a layer has >= 2 experts with
-#   sufficient samples: threshold = _RELATIVE_COLD_FRACTION * median(norm
-#   across layer-mates). Using the median (not the mean) keeps a single
-#   outlier expert from skewing the reference for everyone else. This
-#   self-calibrates to whatever gradient-norm scale the model actually
-#   produces. config.cold_threshold (an absolute value) is used only as
-#   a fallback when there's no peer group to compare against (e.g. a
-#   single-expert layer) — see `_compute_layer_mean_norm`.
+#   cold_threshold is primarily RELATIVE whenever a layer has >= 2 experts
+#   with sufficient samples:
+#       relative = _RELATIVE_COLD_FRACTION * median(norm across layer-mates)
+#       threshold = max(relative, config.cold_threshold, 1e-9)
+#   Using the median keeps a single outlier from skewing the reference.
+#   The absolute config.cold_threshold is always applied as a floor so that
+#   systemic collapse (all experts starving together) cannot hide behind a
+#   collapsing relative reference. When there is no peer group (e.g. a
+#   single-expert layer), only the absolute threshold is used — see
+#   `_compute_layer_mean_norm`.
 #
 # Dependencies
 # ------------
@@ -87,11 +89,10 @@ _MIN_SAMPLES_FOR_DETECTION: int = 3
 # dicts (onset step tracking only — actual norm history lives in StatCollector).
 _MAX_ONSET_HISTORY: int = 1000
 
-# Fraction of a layer's mean expert gradient norm below which an expert is
-# considered "cold" relative to its peers. Used instead of the absolute
-# config.cold_threshold whenever at least two experts in the same layer
-# have enough samples to compute a meaningful peer average — see
-# `_compute_layer_mean_norm` / the `layer_mean_norm` fix in `_analyze_expert`.
+# Fraction of a layer's peer-median gradient norm below which an expert is
+# considered "cold" relative to its peers. Combined with an absolute floor
+# of config.cold_threshold (see threshold selection in `_analyze_expert`)
+# so systemic all-expert collapse cannot evade detection.
 _RELATIVE_COLD_FRACTION: float = 0.5
 
 
@@ -467,16 +468,16 @@ class GradientStarvationAnalyzer:
         # Starvation score: continuous metric
         # ------------------------------------------------------------------
         # Prefer a threshold relative to this expert's layer-mates when at
-        # least one other expert is available for comparison — this is
-        # what actually self-calibrates to the model's real gradient
-        # scale (see `_compute_layer_mean_norm`). Fall back to the
-        # absolute config.cold_threshold only when there's no peer group
-        # to compare against (e.g. a layer with a single expert), since a
-        # relative threshold is meaningless without peers.
+        # least one other expert is available for comparison — this
+        # self-calibrates to the model's real gradient scale (see
+        # `_compute_layer_mean_norm`). Always take the max with the absolute
+        # config.cold_threshold so that when *every* expert collapses
+        # together the relative reference cannot drag the threshold to
+        # near-zero and hide systemic starvation. With no peer group
+        # (single-expert layer), only the absolute threshold is used.
         if n_valid_experts >= 2 and layer_mean_norm > 1e-12:
-            cold_threshold = max(
-                layer_mean_norm * _RELATIVE_COLD_FRACTION, 1e-9
-            )
+            relative = layer_mean_norm * _RELATIVE_COLD_FRACTION
+            cold_threshold = max(relative, self.config.cold_threshold, 1e-9)
         else:
             cold_threshold = max(self.config.cold_threshold, 1e-9)
 
