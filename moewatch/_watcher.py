@@ -97,8 +97,14 @@ class MoEWatchCallback(TrainerCallback):
     """HuggingFace Trainer callback that drives MoEWatch at each training step.
 
     This callback is registered with the HuggingFace ``Trainer`` via
-    ``MoEWatch.attach(trainer)``. After each optimizer step the Trainer
-    calls ``on_step_end``, which delegates to ``MoEWatch.step()``.
+    ``MoEWatch.attach(trainer)``. Before each training step's forward pass
+    the Trainer calls ``on_step_begin``, which delegates to
+    ``MoEWatch.pre_step()``; after each optimizer step the Trainer calls
+    ``on_step_end``, which delegates to ``MoEWatch.step()``. Together these
+    bracket the real training forward/backward pass so router hooks are
+    only armed for that window (see ``MoEWatch.pre_step``/``step``) — this
+    is what keeps hook-captured routing stats from being contaminated by
+    ``Trainer``-driven evaluation passes, which call neither method.
 
     Users do not need to instantiate this class directly; it is created
     automatically by ``MoEWatch.attach()``.
@@ -112,6 +118,46 @@ class MoEWatchCallback(TrainerCallback):
     def __init__(self, moewatch: "MoEWatch") -> None:
         super().__init__()
         self.moewatch: "MoEWatch" = moewatch
+
+    def on_step_begin(
+        self,
+        args: "TrainingArguments",
+        state: "TrainerState",
+        control: "TrainerControl",
+        **kwargs,
+    ) -> None:
+        """Called by the Trainer immediately before each step's forward pass.
+
+        Delegates to ``MoEWatch.pre_step()`` so hooks are armed only for
+        the real training forward/backward pass that follows. Without this,
+        ``MoEWatch`` never observes a pre_step()/step() bracketing pattern
+        and falls back to keeping hooks armed continuously, which lets
+        Trainer-driven evaluation forward passes leak into the training
+        signal. Captures and logs any exceptions so that a monitoring
+        error never interrupts training.
+
+        Parameters
+        ----------
+        args : TrainingArguments
+            HuggingFace training arguments.
+        state : TrainerState
+            Training state, including ``global_step``.
+        control : TrainerControl
+            Training control flags.
+        **kwargs
+            Additional keyword arguments from the Trainer (ignored).
+        """
+        if not self.moewatch._running:
+            return
+        try:
+            self.moewatch.pre_step(global_step=state.global_step)
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.error(
+                "[MoEWatch] Unhandled error in pre_step %d: %s",
+                state.global_step,
+                exc,
+                exc_info=True,
+            )
 
     def on_step_end(
         self,
