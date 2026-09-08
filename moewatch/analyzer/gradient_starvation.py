@@ -189,6 +189,24 @@ class GradientStarvationAnalyzer:
         # {layer_name: {expert_id: onset_step}}
         self._onset_steps: Dict[str, Dict[int, Optional[int]]] = {}
 
+        # global_step of the most recent GradientEvent already counted
+        # toward this expert's consecutive-cold-steps state machine.
+        # {layer_name: {expert_id: last_counted_step}}
+        #
+        # `analyze()` is called once per training step (from
+        # `MoEWatch.step()`), but `config.sample_every` makes gradient
+        # hooks skip most steps, so `grad_stats` — a snapshot read fresh
+        # from StatCollector on every call — repeats the SAME most-recent
+        # sample (same `grad_stats.step`) across every `analyze()` call
+        # until the next sampled step actually fires. Without this guard,
+        # `_starvation_counters[...] += 1` would increment once per
+        # *analysis call* instead of once per *new gradient observation*,
+        # so `cold_steps_limit` (documented in config.py as "consecutive
+        # COLD steps") would really measure elapsed analyzer calls —
+        # reaching the threshold roughly `sample_every` times faster than
+        # the configured number of training steps.
+        self._last_seen_step: Dict[str, Dict[int, int]] = {}
+
     # ------------------------------------------------------------------
     # Primary analysis method
     # ------------------------------------------------------------------
@@ -240,6 +258,7 @@ class GradientStarvationAnalyzer:
             if layer_name not in self._starvation_counters:
                 self._starvation_counters[layer_name] = {}
                 self._onset_steps[layer_name] = {}
+                self._last_seen_step[layer_name] = {}
 
             # Compute a peer reference norm for this layer once, so each
             # expert can be judged relative to its layer-mates rather than
@@ -470,57 +489,76 @@ class GradientStarvationAnalyzer:
         # ------------------------------------------------------------------
         counter_map = self._starvation_counters[layer_name]
         onset_map = self._onset_steps[layer_name]
+        last_seen_map = self._last_seen_step[layer_name]
 
         if expert_id not in counter_map:
             counter_map[expert_id] = 0
             onset_map[expert_id] = None
+            last_seen_map[expert_id] = 0
+
+        # `grad_stats` is re-read fresh from StatCollector on every
+        # `analyze()` call, but a new GradientEvent only actually arrives
+        # every `config.sample_every` training steps. Between sampled
+        # steps, `grad_stats.step` (== `step` here) stays exactly what it
+        # was last time — the analyzer is looking at the same observation
+        # again, not a new one. Only advance the consecutive-cold state
+        # machine when `step` has genuinely moved forward; otherwise
+        # leave the counter untouched and just report the current state.
+        is_new_observation = step > last_seen_map[expert_id]
 
         below_cold = norm_mean < cold_threshold
 
-        if below_cold:
-            counter_map[expert_id] += 1
-            if onset_map[expert_id] is None:
-                # Determine the onset step as accurately as possible.
-                #
-                # When ALL n_samples in the window are zero, starvation
-                # started before the window — back-calculate to the first
-                # event in the buffer: step - (n_samples - 1).
-                # Example: step=2, n_samples=3 (all zero since step 0)
-                #          → onset = 2 - 2 = 0  ✓
-                #
-                # When only the RECENT tail is zero (expert died mid-run),
-                # we can't back-calculate precisely without per-event steps
-                # in GradientStats. Record the current step as a conservative
-                # upper bound — at most _MIN_SAMPLES_FOR_DETECTION steps late.
-                all_zero = (norm_mean == 0.0)
-                if all_zero:
-                    onset_step = max(0, step - (n_samples - 1))
-                else:
-                    onset_step = step
-                onset_map[expert_id] = onset_step
-                logger.debug(
-                    "[MoEWatch] GradientStarvationAnalyzer: expert %d in "
-                    "'%s' fell below cold threshold at step %d "
-                    "(norm_mean=%.5f < threshold=%.5f).",
-                    expert_id,
-                    layer_name,
-                    step,
-                    norm_mean,
-                    cold_threshold,
-                )
-        else:
-            # Expert has recovered — reset counter and onset.
-            if counter_map[expert_id] > 0:
-                logger.debug(
-                    "[MoEWatch] GradientStarvationAnalyzer: expert %d in "
-                    "'%s' recovered at step %d (norm_mean=%.5f).",
-                    expert_id,
-                    layer_name,
-                    step,
-                    norm_mean,
-                )
-            counter_map[expert_id] = 0
-            onset_map[expert_id] = None
+        if is_new_observation:
+            last_seen_map[expert_id] = step
+
+            if below_cold:
+                counter_map[expert_id] += 1
+                if onset_map[expert_id] is None:
+                    # Determine the onset step as accurately as possible.
+                    #
+                    # When ALL n_samples in the window are zero, starvation
+                    # started before the window — back-calculate to the first
+                    # event in the buffer: step - (n_samples - 1).
+                    # Example: step=2, n_samples=3 (all zero since step 0)
+                    #          → onset = 2 - 2 = 0  ✓
+                    #
+                    # When only the RECENT tail is zero (expert died mid-run),
+                    # we can't back-calculate precisely without per-event steps
+                    # in GradientStats. Record the current step as a conservative
+                    # upper bound — at most _MIN_SAMPLES_FOR_DETECTION steps late.
+                    all_zero = (norm_mean == 0.0)
+                    if all_zero:
+                        onset_step = max(0, step - (n_samples - 1))
+                    else:
+                        onset_step = step
+                    onset_map[expert_id] = onset_step
+                    logger.debug(
+                        "[MoEWatch] GradientStarvationAnalyzer: expert %d in "
+                        "'%s' fell below cold threshold at step %d "
+                        "(norm_mean=%.5f < threshold=%.5f).",
+                        expert_id,
+                        layer_name,
+                        step,
+                        norm_mean,
+                        cold_threshold,
+                    )
+            else:
+                # Expert has recovered — reset counter and onset.
+                if counter_map[expert_id] > 0:
+                    logger.debug(
+                        "[MoEWatch] GradientStarvationAnalyzer: expert %d in "
+                        "'%s' recovered at step %d (norm_mean=%.5f).",
+                        expert_id,
+                        layer_name,
+                        step,
+                        norm_mean,
+                    )
+                counter_map[expert_id] = 0
+                onset_map[expert_id] = None
+        # else: stale snapshot (no new GradientEvent since the last
+        # analyze() call for this expert) — counter_map/onset_map are
+        # left exactly as they were; `below_cold` below still reflects
+        # the most recent real observation for reporting purposes.
 
         consecutive_cold = counter_map[expert_id]
         starvation_detected = consecutive_cold >= self.config.cold_steps_limit
@@ -556,9 +594,11 @@ class GradientStarvationAnalyzer:
         if layer_name is not None:
             self._starvation_counters.pop(layer_name, None)
             self._onset_steps.pop(layer_name, None)
+            self._last_seen_step.pop(layer_name, None)
         else:
             self._starvation_counters.clear()
             self._onset_steps.clear()
+            self._last_seen_step.clear()
 
     def get_starvation_count(self, layer_name: str, expert_id: int) -> int:
         """Return current consecutive-cold-steps count for one expert.
