@@ -104,12 +104,8 @@ def main():
                 label=f"layer {gate.split('.')[1]} — With MoEWatch",
                 linewidth=1.2, color=color)
 
-    ax.axhline(0.3, color="gray", linewidth=0.8, linestyle="--",
-               label="aux_loss threshold (0.30)")
-    ax.axhline(0.6, color="orange", linewidth=0.8, linestyle="--",
-               label="router_noise threshold (0.60)")
-    ax.axhline(0.8, color="red", linewidth=0.8, linestyle="--",
-               label="expert_dropout threshold (0.80)")
+    ax.axhline(0.25, color="gray", linewidth=0.8, linestyle="--",
+               label="intervention threshold (0.25)")
     for ev in with_["interventions"]:
         ax.axvline(ev["step"], color="green", alpha=0.08, linewidth=1)
     ax.set_title("Collapse risk score — all layers\n"

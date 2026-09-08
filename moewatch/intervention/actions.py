@@ -774,6 +774,7 @@ class ExpertDropoutAction(InterventionAction):
         )
         self.dropout_delta: float = dropout_delta
         self._original_dropout: Optional[dict[str, float]] = None
+        self._resolved_root_name: Optional[str] = None
 
     def apply(self, model: Any) -> None:
         """Increase dropout probability on the target expert module(s).
@@ -809,18 +810,10 @@ class ExpertDropoutAction(InterventionAction):
             )
             return
 
-        module = self._resolve_module(model, self.layer_name)
-        if module is None:
+        resolved = self._resolve_dropout_targets(model)
+        if resolved is None:
             return
-
-        dropout_modules = dict(self._find_dropout_modules(module))
-        if not dropout_modules:
-            logger.warning(
-                "[MoEWatch] ExpertDropoutAction: no nn.Dropout submodules "
-                "found under '%s'; action is a no-op.",
-                self.layer_name,
-            )
-            return
+        root_name, dropout_modules = resolved
 
         original: dict[str, float] = {}
         for sub_name, dropout_module in dropout_modules.items():
@@ -828,6 +821,10 @@ class ExpertDropoutAction(InterventionAction):
             new_p = min(1.0, max(0.0, dropout_module.p + self.dropout_delta))
             dropout_module.p = new_p
 
+        # Remember which module path actually owned the Dropout modules so
+        # revert() can re-resolve them even when layer_name is a gate leaf
+        # (e.g. "blocks.2.moe.gate") that has no Dropout children itself.
+        self._resolved_root_name = root_name
         self._original_dropout = original
 
         logger.info(
@@ -859,9 +856,11 @@ class ExpertDropoutAction(InterventionAction):
         if self._original_dropout is None:
             return
 
-        module = self._resolve_module(model, self.layer_name)
+        root_name = getattr(self, "_resolved_root_name", None) or self.layer_name
+        module = self._resolve_module(model, root_name)
         if module is None:
             self._original_dropout = None
+            self._resolved_root_name = None
             return
 
         dropout_modules = dict(self._find_dropout_modules(module))
@@ -873,7 +872,7 @@ class ExpertDropoutAction(InterventionAction):
                     "[MoEWatch] ExpertDropoutAction: submodule '%s' under "
                     "'%s' no longer found during revert; skipping.",
                     sub_name or "<self>",
-                    self.layer_name,
+                    root_name,
                 )
                 continue
             dropout_module.p = original_p
@@ -882,10 +881,50 @@ class ExpertDropoutAction(InterventionAction):
             "[MoEWatch] ExpertDropoutAction: restored dropout for %d "
             "submodule(s) under '%s'.",
             len(self._original_dropout),
-            self.layer_name,
+            root_name,
         )
 
         self._original_dropout = None
+        self._resolved_root_name = None
+
+    def _resolve_dropout_targets(
+        self, model: Any
+    ) -> "tuple[str, dict[str, torch.nn.Module]] | None":
+        """Locate Dropout modules for this action's ``layer_name``.
+
+        ``layer_name`` is also the InterventionEngine tracking key and is
+        typically a *gate* path (e.g. ``blocks.2.moe.gate``). Gate leaves
+        are ``nn.Linear`` modules with no Dropout children. When no Dropout
+        is found under the resolved module, walk up one dotted component
+        (the MoE block) and search there so the action can still apply
+        while keeping the gate path for observation-window / risk-score
+        bookkeeping.
+        """
+        module = self._resolve_module(model, self.layer_name)
+        if module is None:
+            return None
+
+        dropout_modules = dict(self._find_dropout_modules(module))
+        root_name = self.layer_name
+
+        if not dropout_modules and "." in self.layer_name:
+            parent_name = self.layer_name.rsplit(".", 1)[0]
+            parent = self._resolve_module(model, parent_name)
+            if parent is not None:
+                parent_dropouts = dict(self._find_dropout_modules(parent))
+                if parent_dropouts:
+                    dropout_modules = parent_dropouts
+                    root_name = parent_name
+
+        if not dropout_modules:
+            logger.warning(
+                "[MoEWatch] ExpertDropoutAction: no nn.Dropout submodules "
+                "found under '%s' (or its parent); action is a no-op.",
+                self.layer_name,
+            )
+            return None
+
+        return root_name, dropout_modules
 
     @staticmethod
     def _find_dropout_modules(

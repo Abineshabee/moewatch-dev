@@ -584,13 +584,26 @@ class RulePolicy(PolicyBase):
         magnitude instead of being a hard veto.
         """
 
-        def _capped(default: float) -> float:
-            return min(default, max_delta) if max_delta is not None else default
+        def _magnitude(default: float) -> float:
+            # intervention_max_delta is the single strength control.
+            # Previously only a downward clamp against hardcoded defaults
+            # was applied (min(default, max_delta)), so raising
+            # intervention_max_delta above 0.1 could never increase
+            # RouterNoise / ExpertDropout / AuxLoss magnitudes — the
+            # Base-comparison collapse-pressure demo (bias≈2.0) was
+            # therefore stuck with noise_std=0.1 and could not counteract
+            # the bias. When max_delta is provided, use it as the magnitude
+            # (SafetyGuard still rejects anything above the same ceiling).
+            if max_delta is not None:
+                return float(max_delta)
+            return default
 
         if action_type == "aux_loss":
-            return AuxLossAction(layer_name=layer_name, delta=_capped(0.05))
+            return AuxLossAction(layer_name=layer_name, delta=_magnitude(0.05))
         if action_type == "router_noise":
-            return RouterNoiseAction(layer_name=layer_name, noise_scale=_capped(0.1))
+            return RouterNoiseAction(layer_name=layer_name, noise_scale=_magnitude(0.1))
         if action_type == "expert_dropout":
-            return ExpertDropoutAction(layer_name=layer_name, dropout_delta=_capped(0.1))
+            return ExpertDropoutAction(
+                layer_name=layer_name, dropout_delta=_magnitude(0.1)
+            )
         return NoOpAction(layer_name=layer_name)
