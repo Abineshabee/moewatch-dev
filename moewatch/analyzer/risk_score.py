@@ -228,6 +228,15 @@ class RiskScoreFuser:
         # Cache of most recent RiskReport per layer.
         self._latest_reports: Dict[str, RiskReport] = {}
 
+        # Cache entropy thresholds from config so fuse() can apply the
+        # critical-entropy floor without re-reading config every call.
+        self._entropy_critical_threshold: float = float(
+            getattr(config, "entropy_critical", 0.15)
+        )
+        self._entropy_warn_threshold: float = float(
+            getattr(config, "entropy_warn", 0.3)
+        )
+
     # ------------------------------------------------------------------
     # Primary fusion method
     # ------------------------------------------------------------------
@@ -332,9 +341,35 @@ class RiskScoreFuser:
         tier2_contrib = float(w2 * t2_raw)
         tier3_contrib = float(w3 * t3_raw)
 
-        risk_score = float(
-            np.clip(tier1_contrib + tier2_contrib + tier3_contrib, 0.0, 1.0)
-        )
+        fused = float(tier1_contrib + tier2_contrib + tier3_contrib)
+
+        # Critical-entropy floor: if entropy has fallen below entropy_critical,
+        # the weighted fusion alone under-reports severity because T2's weight
+        # is only 0.333 (or 0.667 if T1 is unavailable).  Map the gap below
+        # entropy_critical to a [0, 1] severity score and take the max so the
+        # risk score can reach the full range through entropy alone.
+        #   entropy = entropy_critical  →  severity = 0
+        #   entropy = 0.5 * entropy_critical  →  severity ≈ 0.5
+        #   entropy = 0.0               →  severity = 1.0
+        _ec = self._entropy_critical_threshold  # cached from config in __init__
+        if norm_entropy < _ec and _ec > 0.0:
+            # How far below the critical threshold are we, normalised to [0, 1]?
+            critical_severity = float(
+                np.clip(1.0 - (norm_entropy / _ec), 0.0, 1.0)
+            )
+            # Blend: at the boundary (severity=0) the floor equals the fused
+            # score; at full collapse (severity=1) the floor = 1.0.  We take
+            # max so normal fusion can still exceed the floor if T1 is strong.
+            entropy_floor = float(
+                np.clip(
+                    fused + critical_severity * (1.0 - fused),
+                    0.0,
+                    1.0,
+                )
+            )
+            fused = max(fused, entropy_floor)
+
+        risk_score = float(np.clip(fused, 0.0, 1.0))
 
         # ------------------------------------------------------------------
         # Risk level classification
