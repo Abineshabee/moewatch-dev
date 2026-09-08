@@ -67,6 +67,23 @@ def make_config() -> WatchConfig:
         Relaxed because CE loss on this tiny model is noisy (range 3-4.5).
         A threshold of 1.5x would falsely block interventions during
         normal training spikes.
+
+    stats_window=20:
+        WatchConfig's own docstring for this field says it plainly: "the
+        default of 100 suits production runs of 1,000+ steps; for shorter
+        benchmarks or fast-iteration experiments, values of 20-50 give
+        quicker response." This 400-step demo on a tiny model is exactly
+        that "shorter benchmark" case, yet every other parameter here was
+        hand-tuned for it while this one was left at the 100-step
+        production default. At window=100, EntropyAnalyzer/RiskScoreFuser
+        see a trailing 100-step average of the routing distribution — so
+        during the ~50-100 step collapse ramp this schedule produces, the
+        risk score stays deceptively low (diluted by the many still-healthy
+        older steps still inside the window) long after the *current*
+        routing has actually collapsed. That is what caused intervention
+        to fire only twice across all 400 steps and let layers 1-2 rack up
+        dead-expert steps before recovering. window=20 keeps the analyzer's
+        view close to the model's actual current state.
     """
     return WatchConfig(
         output=OutputMode.SILENT,
@@ -86,6 +103,7 @@ def make_config() -> WatchConfig:
         reward_window_steps=10,
         baseline_min_clean_steps=5,
         baseline_exclusion_window=5,
+        stats_window=20,               # key: fast response for this short/tiny run
     )
 
 
