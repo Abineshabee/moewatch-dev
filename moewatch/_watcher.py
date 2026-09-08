@@ -861,7 +861,7 @@ class MoEWatch:
                     policy=self.policy,
                 )
             except Exception as exc:
-                logger.debug(
+                logger.warning(
                     "[MoEWatch] Observation window check error at step %d: %s",
                     global_step, exc,
                 )
@@ -1336,11 +1336,10 @@ class MoEWatch:
                         state,
                     )
                     applied_interventions.append(validated_action)
-                    # Mark baseline as intervention-influenced
-                    self.baseline_tracker.mark_intervention(
-                        layer_name=layer_name,
-                        start_step=step,
-                    )
+                    # Baseline exclusion is recorded inside
+                    # InterventionEngine.apply_intervention via
+                    # baseline_tracker.mark_intervention — do not call it
+                    # again here (duplicate windows).
                     logger.info(
                         "[MoEWatch] Applied '%s' on '%s' at step %d "
                         "(risk=%.3f).",
@@ -1351,7 +1350,8 @@ class MoEWatch:
                     )
 
             except Exception as exc:  # pylint: disable=broad-except
-                logger.debug(
+                # Visible by default so failed interventions are not silent.
+                logger.warning(
                     "[MoEWatch] Intervention error on layer '%s' at step %d: %s",
                     layer_name, step, exc,
                 )

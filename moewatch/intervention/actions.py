@@ -364,6 +364,9 @@ class AuxLossAction(InterventionAction):
     #: checked in order on ``trainer.model.config``.
     _COEF_ATTRS: tuple[str, ...] = ("aux_loss_coef", "router_aux_loss_coef")
 
+    #: Emit loss-wiring reminder at most once per process.
+    _loss_wiring_warned: bool = False
+
     #: aux_loss_coef lives on the shared model.config, not on this
     #: action's own layer_name submodule — see InterventionAction.is_global_resource.
     is_global_resource: bool = True
@@ -454,6 +457,17 @@ class AuxLossAction(InterventionAction):
             new_value,
             self.layer_name,
         )
+        if not AuxLossAction._loss_wiring_warned:
+            AuxLossAction._loss_wiring_warned = True
+            logger.warning(
+                "[MoEWatch] AuxLossAction: '%s' was raised on model.config, "
+                "but MoEWatch does not add aux loss to the training objective. "
+                "The training loop must include "
+                "loss = ce_loss + model.config.%s * aux_loss "
+                "or this intervention has no training effect.",
+                attr,
+                attr,
+            )
 
     def revert(self, model: Any) -> None:
         """Restore the original auxiliary loss coefficient.
